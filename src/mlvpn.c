@@ -90,7 +90,6 @@ static uint64_t data_seq = 0;
 ev_tstamp lastsent=0;
 uint64_t bandwidthdata=0;
 double bandwidth=0;
-uint64_t permitted_preset=0;
 
 struct mlvpn_status_s mlvpn_status = {
     .start_time = 0,
@@ -186,10 +185,51 @@ usage(char **argv)
             " -v --verbose          increase verbosity\n"
             " -q --quiet            decrease verbosity\n"
             " -V, --version         output version information and exit\n"
-            " -p, --permitted       Set all tunnels with a quota to this value of permitted bytes\n"
+            " -p, --permitted <tunnel>:<value>[bkm]      Preset tunnel initial permitted bandwidth (Bytes - Default,Kbytes or Mbytes)\n"
             "\n"
             "For more details see mlvpn(1) and mlvpn.conf(5).\n", argv[0]);
     exit(2);
+}
+
+void preset_permitted(int argc, char **argv)
+{
+  mlvpn_tunnel_t *t;
+  char tunname[21];
+  uint64_t val=0;
+  char c, mag=0;
+  int filled, option_index;
+  optind=0;
+    while(1)
+    {
+        c = getopt_long(argc, argv, optstr, long_options, &option_index);
+        if (c == -1)
+            break;
+
+        switch (c)
+        {
+          case 'p':
+            filled=sscanf(optarg,"%20[^:]:%lu%c",tunname, &val, &mag);
+            if (filled<2) {
+              usage(argv);
+            }
+            if (filled==3) {
+              switch (mag) {
+                default: usage(argv);
+                case 'm': val*=1000;
+                case 'k': val*=1000;
+                case 'b': break;
+              }
+            }
+            int found=0;
+            LIST_FOREACH(t, &rtuns, entries) {
+              if (strcmp(t->name,tunname)==0 && t->quota) {
+                t->permitted=val;
+                found++;
+              }
+            }
+            if (!found) usage(argv);
+        }
+    }
 }
 
 int
@@ -698,11 +738,7 @@ mlvpn_rtun_new(const char *name,
     new->sentpackets = 0;
     new->sentbytes = 0;
     new->recvbytes = 0;
-    if (quota) {
-      new->permitted = permitted_preset;
-    } else {
-      new->permitted = 0;
-    }
+    new->permitted = 0;
     new->quota = quota;
     new->seq = 0;
     new->expected_receiver_seq = 0;
@@ -1578,9 +1614,7 @@ main(int argc, char **argv)
         case 'q': /* --quiet */
             mlvpn_options.verbose--;
             break;
-        case 'p': /* preset the current 'permitted' values (for all tunnels with
-                   * a quota, which is a pritty rubish plan*/
-            permitted_preset=atoll(optarg);
+        case 'p': /* will be checked later, move on */
             break;
         case 'h': /* --help */
         default:
@@ -1669,6 +1703,9 @@ main(int argc, char **argv)
         log_info(NULL, "created interface `%s'", tuntap.devname);
     mlvpn_sock_set_nonblocking(tuntap.fd);
 
+
+    preset_permitted(argc, saved_argv);
+    
     /* This is a dummy value which will be overwritten when the first
      * SRTT values will be available
      */
