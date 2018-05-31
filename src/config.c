@@ -35,7 +35,6 @@ extern char *status_command;
 extern struct mlvpn_options_s mlvpn_options;
 extern struct mlvpn_filters_s mlvpn_filters;
 extern struct tuntap_s tuntap;
-extern struct mlvpn_reorder_buffer *reorder_buffer;
 
 char *ip_from_if(char *ifname);
 // we'll declair this here, so that any device name used instead of an IP
@@ -63,7 +62,6 @@ mlvpn_config(int config_file_fd, int first_time)
     uint32_t default_server_mode = 0; /* 0 => client */
     uint32_t cleartext_data = 0;
     uint32_t fallback_only = 0;
-    uint32_t reorder_buffer_size = 0;
 
     mlvpn_options.fallback_available = 0;
 
@@ -167,31 +165,15 @@ mlvpn_config(int config_file_fd, int first_time)
                     default_timeout = 5;
                 }
 
-                _conf_set_uint_from_conf(
-                    config, lastSection, "reorder_buffer_size",
-                    &reorder_buffer_size,
-                    0, NULL, 0);
-                if (reorder_buffer_size != mlvpn_options.reorder_buffer_size) {
-                    log_info("config",
-                        "reorder_buffer_size changed from %d to %d",
-                        mlvpn_options.reorder_buffer_size,
-                        reorder_buffer_size);
-                    if (reorder_buffer_size != 0 &&
-                            mlvpn_options.reorder_buffer_size != 0) {
-                        mlvpn_reorder_free(reorder_buffer);
-                        reorder_buffer = NULL;
-                    }
-                    mlvpn_options.reorder_buffer_size = reorder_buffer_size;
-                    if (mlvpn_options.reorder_buffer_size > 0) {
-                        if (reorder_buffer) {
-                            mlvpn_reorder_free(reorder_buffer);
-                        }
-                        reorder_buffer = mlvpn_reorder_create(
-                            mlvpn_options.reorder_buffer_size);
-                        if (reorder_buffer == NULL) {
-                            fatal("config", "reorder_buffer allocation failed");
-                        }
-                    }
+                _conf_set_str_from_conf(
+                  config, lastSection, "reorder_buffer", &tmp, NULL, NULL, 0);
+                if (tmp) {
+                  mlvpn_reorder_reset();
+                  if (strcmp(tmp, "yes") == 0) {
+                    mlvpn_reorder_enable();
+                  } else {
+                    log_warnx("config", "Reorder buffer disabled");
+                  }
                 }
 
                 _conf_set_uint_from_conf(

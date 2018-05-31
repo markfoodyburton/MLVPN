@@ -48,61 +48,29 @@
  */
 
 
-struct mlvpn_reorder_buffer;
+/**
+ * Initializes reorder buffer, called once (from main)
+ * (initially disabled)
+ */
+void mlvpn_reorder_init();
 
 /**
- * Create a new reorder buffer instance
- *
- * Allocate memory and initialize a new reorder buffer in that
- * memory, returning the reorder buffer pointer to the user
- * @param size
- *   Max number of elements that can be stored in the reorder buffer
- * @return
- *   The initialized reorder buffer instance, or NULL on error
- *   On error case, mlvpn_errno will be set appropriately:
- *    - ENOMEM - no appropriate memory area found in which to create memzone
- *    - EINVAL - invalid parameters
+ * Reset the reorder buffer instance with initial values.
+ * (initially disabled)
  */
-struct mlvpn_reorder_buffer *
-mlvpn_reorder_create(unsigned int size);
+void mlvpn_reorder_reset();
 
 /**
- * Initializes given reorder buffer instance
- *
- * @param b
- *   Reorder buffer instance to initialize
- * @param bufsize
- *   Size of the reorder buffer
- * @param size
- *   Number of elements that can be stored in reorder buffer
- * @return
- *   The initialized reorder buffer instance, or NULL on error
- *   On error case, mlvpn_errno will be set appropriately:
- *    - EINVAL - invalid parameters
+ * adjust timeout
  */
-struct mlvpn_reorder_buffer *
-mlvpn_reorder_init(struct mlvpn_reorder_buffer *b, unsigned int bufsize,
-    unsigned int size);
+void mlvpn_reorder_adjust_timeout(double t);
+
 
 /**
- * Reset the given reorder buffer instance with initial values.
+ * ENABLE reorder buffer.
  *
- * @param b
- *   Reorder buffer instance which has to be reset
  */
-void
-mlvpn_reorder_reset(struct mlvpn_reorder_buffer *b);
-
-/**
- * Free reorder buffer instance.
- *
- * @param b
- *   reorder buffer instance
- * @return
- *   None
- */
-void
-mlvpn_reorder_free(struct mlvpn_reorder_buffer *b);
+void mlvpn_reorder_enable();
 
 /**
  * Insert given pkt in reorder buffer in its correct position
@@ -113,47 +81,10 @@ mlvpn_reorder_free(struct mlvpn_reorder_buffer *b);
  * packets can later be taken from the buffer using the mlvpn_reorder_drain()
  * API.
  *
- * @param b
- *   Reorder buffer where the pkt has to be insemlvpnd.
  * @param pkt
  *   pkt that needs to be inserted in reorder buffer.
- * @return
- *   0 on success
- *   -1 on error
- *   On error case, mlvpn_errno will be set appropriately:
- *    - ENOSPC - Cannot move existing pkts from reorder buffer to accommodate
- *      ealry pkt, but it can be accomodated by performing drain and then insert.
- *    - ERANGE - Too early or late pkt which is vastly out of range of expected
- *      window should be ingnored without any handling.
  */
-int
-mlvpn_reorder_insert(struct mlvpn_reorder_buffer *b, mlvpn_pkt_t *pkt);
-
-/**
- * Fetch reordered buffers
- *
- * Returns a set of in-order buffers from the reorder buffer structure. Gaps
- * may be present in the sequence numbers of the pkt if packets have been
- * delayed too long before reaching the reorder window, or have been previously
- * dropped by the system.
- *
- * @param b
- *   Reorder buffer instance from which packets are to be drained
- * @param pkts
- *   array of pkts where reordered packets will be insemlvpnd from reorder buffer
- * @param max_pkts
- *   the number of elements in the pkts array.
- * @return
- *   number of pkt pointers written to pkts. 0 <= N < max_pkts.
- */
-unsigned int
-mlvpn_reorder_drain(struct mlvpn_reorder_buffer *b, mlvpn_pkt_t **pkts,
-        unsigned max_pkts);
-
-
-/* skip over any holes in the buffer to try and force more data to be available
- * to drain */
-void mlvpn_reorder_skip(struct mlvpn_reorder_buffer *b);
+void mlvpn_reorder_insert(mlvpn_pkt_t *pkt);
 
 
 #endif /* MLVPN_REORDER_H */
