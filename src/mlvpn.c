@@ -804,26 +804,30 @@ mlvpn_rtun_recalc_weight_prio()
   }
   mlvpn_tunnel_t *t;
   double bwneeded=bandwidth*1.5;
-  double bw=bwneeded;
+  double bwavailable=0;
   LIST_FOREACH(t, &rtuns, entries) {
     if ((t->quota == 0) && (t->status >= MLVPN_AUTHOK)) {
-      mlvpn_rtun_set_weight(t, (t->bandwidth*80) / bwneeded);
-      bw-=(t->bandwidth*0.8);
+      mlvpn_rtun_set_weight(t, (t->bandwidth*80));
+      bwavailable+=(t->bandwidth*0.8);
     } else {
-    if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth*3)) && (t->status >= MLVPN_AUTHOK)) {
-      if (t->bandwidth*0.8 > bw) {
-        mlvpn_rtun_set_weight(t, (bw*100) / bwneeded);
+      double bw=bwneeded - bwavailable;
+      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth*3)) && (t->status >= MLVPN_AUTHOK)) {
+        if (t->bandwidth*0.8 > bw) {
+          mlvpn_rtun_set_weight(t, (bw*100));
+          bwavailable+=bw;
+        } else {
+          mlvpn_rtun_set_weight(t, (t->bandwidth*80));
+          bwavailable+=(t->bandwidth*0.8);
+        }
       } else {
-        mlvpn_rtun_set_weight(t, (t->bandwidth*80) / bwneeded);
+        mlvpn_rtun_set_weight(t, 0);
       }
-      bw-=(t->bandwidth*0.8);
-    } else {
-      mlvpn_rtun_set_weight(t, 0);
     }
-    }
-    
   }
-  if (bw==bwneeded) {
+  LIST_FOREACH(t, &rtuns, entries) {
+    mlvpn_rtun_set_weight(t, (t->weight/bwavailable));
+  }
+  if (bwavailable==0) {
     return mlvpn_rtun_recalc_weight_bw();
   }
 }
