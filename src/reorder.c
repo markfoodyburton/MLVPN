@@ -114,6 +114,7 @@ void mlvpn_reorder_enable()
 void mlvpn_reorder_adjust_timeout(double t)
 {
   reorder_drain_timeout.repeat = t;
+//  printf("rtt %f\n", reorder_drain_timeout.repeat);
 }
 
 void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
@@ -176,13 +177,21 @@ void mlvpn_reorder_drain()
          (((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0) ||
           (TAILQ_LAST(&b->list,list_t)->timestamp < cut))) {
     struct pkttailq *l = TAILQ_LAST(&b->list,list_t);
+
+/*    if ((TAILQ_LAST(&b->list,list_t)->timestamp < cut)) {
+      printf("P %lu ",l->pkt.seq);
+    } else {
+      printf("D %lu ",l->pkt.seq);
+    }
+*/  
+    
     mlvpn_rtun_inject_tuntap(&l->pkt);
     TAILQ_REMOVE(&b->list, l, entry);
     TAILQ_INSERT_TAIL(&b->pool, l, entry);
   
     b->min_seqn=l->pkt.seq+1;
   }
-  
+//  printf("\n");
   if (TAILQ_EMPTY(&b->list)) {
     ev_timer_stop(EV_A_ &reorder_drain_timeout);
   } else {

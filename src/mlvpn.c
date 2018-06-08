@@ -264,7 +264,7 @@ void mlvpn_rtun_inject_tuntap(mlvpn_pkt_t *pkt)
 static void
 mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
 {
-    if (seq > tun->seq_last + 64) {
+  if (seq > tun->seq_last + 64) {
         /* consider a connection reset. */
         tun->seq_vect = (uint64_t) -1;
         tun->seq_last = seq;
@@ -482,7 +482,7 @@ mlvpn_protocol_read(
     if (proto.version >= 1) {
         decap_pkt->reorder = proto.reorder;
         decap_pkt->seq = be64toh(proto.data_seq);
-        mlvpn_loss_update(tun, be64toh(proto.tun_seq));
+        mlvpn_loss_update(tun, proto.tun_seq);
                          // use the TUN seq number to
                          // calculate loss
     } else {
