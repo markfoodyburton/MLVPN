@@ -264,6 +264,23 @@ void mlvpn_rtun_inject_tuntap(mlvpn_pkt_t *pkt)
 static void
 mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
 {
+    if (seq > tun->seq_last + 64) {
+        /* consider a connection reset. */
+        tun->seq_vect = (uint64_t) -1;
+        tun->seq_last = seq;
+    } else if (seq > tun->seq_last) {
+        /* new sequence number -- recent message arrive */
+        tun->seq_vect <<= seq - tun->seq_last;
+        tun->seq_vect |= 1;
+        tun->seq_last = seq;
+    } else if (seq >= tun->seq_last - 63) {
+        tun->seq_vect |= (1 << (tun->seq_last - seq));
+    }
+}
+
+
+#if 0
+{
 // If a tunnel moves forward, leaving a 'hole' - then we GUESS the hole is for
 // the other tunnel, and if it's not filled in, will be a loss marked for the
 // other tunnel.
@@ -291,25 +308,29 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
     }
   } 
 }
+#endif
 
 int
 mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
 {
-    int loss = 0;
-    unsigned int i;
-    /* Count zeroes */
-    for (i = 0; i < 64; i++) {
-      if ( (1 & (tun->seq_vect >> i)) == 0 ) {
-        loss++;
-      }
+  if (tun->status < MLVPN_AUTHOK) {
+    return 0; // for links that are down, report a 0 loss.
+  } 
+  int loss = 0;
+  unsigned int i;
+  /* Count zeroes */
+  for (i = 0; i < 64; i++) {
+    if ( (1 & (tun->seq_vect >> i)) == 0 ) {
+      loss++;
     }
-    return (loss * 100) / 64;
+  }
+  return (loss * 100) / 64;
 }
 
 static void
 mlvpn_rtun_recv_data(mlvpn_tunnel_t *tun, mlvpn_pkt_t *inpkt)
 {
-        mlvpn_reorder_insert( inpkt );
+  mlvpn_reorder_insert( inpkt );
 }
 
 
@@ -432,7 +453,7 @@ mlvpn_protocol_read(
         goto fail;
     }
 
-    proto.seq = be64toh(proto.seq);
+    proto.tun_seq = be64toh(proto.tun_seq);
     proto.timestamp = be16toh(proto.timestamp);
     proto.timestamp_reply = be16toh(proto.timestamp_reply);
     proto.flow_id = be32toh(proto.flow_id);
@@ -442,8 +463,8 @@ mlvpn_protocol_read(
         memcpy(decap_pkt->data, &proto.data, rlen);
     } else {
         sodium_memzero(nonce, sizeof(nonce));
-        memcpy(nonce, &proto.seq, sizeof(proto.seq));
-        memcpy(nonce + sizeof(proto.seq), &proto.flow_id, sizeof(proto.flow_id));
+        memcpy(nonce, &proto.tun_seq, sizeof(proto.tun_seq));
+        memcpy(nonce + sizeof(proto.tun_seq), &proto.flow_id, sizeof(proto.flow_id));
         if ((ret = crypto_decrypt((unsigned char *)decap_pkt->data,
                                   (const unsigned char *)&proto.data, rlen,
                                   nonce)) != 0) {
@@ -461,7 +482,9 @@ mlvpn_protocol_read(
     if (proto.version >= 1) {
         decap_pkt->reorder = proto.reorder;
         decap_pkt->seq = be64toh(proto.data_seq);
-        mlvpn_loss_update(tun, decap_pkt->seq);
+        mlvpn_loss_update(tun, be64toh(proto.tun_seq));
+                         // use the TUN seq number to
+                         // calculate loss
     } else {
         decap_pkt->reorder = 0;
         decap_pkt->seq = 0;
@@ -505,15 +528,17 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     mlvpn_pkt_t *pkt = mlvpn_pktbuffer_read(pktbuf);
 
     pkt->reorder = 1;
+    // should packet inspect, and only re-order TCP packets !
     if (pkt->type == MLVPN_PKT_DATA && pkt->reorder) {
         proto.data_seq = data_seq++;
     }
     wlen = PKTHDRSIZ(proto) + pkt->len;
     proto.len = pkt->len;
     proto.flags = pkt->type;
-    if (pkt->reorder) {
-        proto.seq = tun->seq++;
-    }
+//    if (pkt->reorder) {
+// we should still use this to measure packet loss even if they are UDP packets
+        proto.tun_seq = tun->seq++;
+//    }
     proto.flow_id = tun->flow_id;
     proto.version = MLVPN_PROTOCOL_VERSION;
     proto.reorder = pkt->reorder;
@@ -549,8 +574,8 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
             return -1;
         }
         sodium_memzero(nonce, sizeof(nonce));
-        memcpy(nonce, &proto.seq, sizeof(proto.seq));
-        memcpy(nonce + sizeof(proto.seq), &proto.flow_id, sizeof(proto.flow_id));
+        memcpy(nonce, &proto.tun_seq, sizeof(proto.tun_seq));
+        memcpy(nonce + sizeof(proto.tun_seq), &proto.flow_id, sizeof(proto.flow_id));
         if ((ret = crypto_encrypt((unsigned char *)&proto.data,
                                   (const unsigned char *)&pkt->data, pkt->len,
                                   nonce)) != 0) {
@@ -565,7 +590,7 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     memcpy(&proto.data, &pkt->data, pkt->len);
 #endif
     proto.len = htobe16(proto.len);
-    proto.seq = htobe64(proto.seq);
+    proto.tun_seq = htobe64(proto.tun_seq);
     proto.data_seq = htobe64(proto.data_seq);
     proto.flow_id = htobe32(proto.flow_id);
     proto.timestamp = htobe16(proto.timestamp);

@@ -33,7 +33,7 @@ typedef struct {
     uint16_t timestamp;
     uint16_t timestamp_reply;
     uint32_t flow_id;
-    uint64_t seq;         /* Stream sequence per flow (for crypto) */
+    uint64_t tun_seq;     /* Stream sequence per flow (for crypto) */
     uint64_t data_seq;    /* data packets global sequence */
     char data[DEFAULT_MTU];
 } __attribute__((packed)) mlvpn_proto_t;

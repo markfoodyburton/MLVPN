@@ -119,7 +119,7 @@ void mlvpn_reorder_adjust_timeout(double t)
 void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
 {
   struct mlvpn_reorder_buffer *b=reorder_buffer;
-  if (!b->enabled) {
+  if (!b->enabled || !pkt->reorder) {
     return mlvpn_rtun_inject_tuntap(pkt);
   }
 
