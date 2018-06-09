@@ -40,7 +40,7 @@
 #include "reorder.h"
 #include "log.h"
 
-
+//#include "mlvpn.h"
 
 struct pkttailq
 {
@@ -56,6 +56,8 @@ struct mlvpn_reorder_buffer {
   uint64_t min_seqn;  /**< Lowest seq. number that can be in the buffer */
   int is_initialized;
   int enabled;
+  int list_size;
+  int list_size_av;
   int max_size;
 
   TAILQ_HEAD(list_t, pkttailq) list, pool;
@@ -70,7 +72,8 @@ void mlvpn_reorder_drain();
 void mlvpn_reorder_drain_timeout(EV_P_ ev_timer *w, int revents)
 {
     log_debug("reorder", "reorder timeout. Packet loss?");
-
+    printf("reorder timeout\n");
+    
     struct mlvpn_reorder_buffer *b=reorder_buffer;
 
     if (!TAILQ_EMPTY(&b->list)) {
@@ -99,8 +102,10 @@ mlvpn_reorder_reset()
   while (!TAILQ_EMPTY(&b->list)) {
     struct pkttailq *p = TAILQ_FIRST(&b->list);
     TAILQ_REMOVE(&b->list, p, entry);
-    TAILQ_INSERT_HEAD(&b->pool, TAILQ_FIRST(&b->list), entry);
+    TAILQ_INSERT_HEAD(&b->pool, p, entry);
   }
+  b->list_size=0;
+  b->list_size_av=10;
   b->is_initialized=0;
   b->enabled=0;
   mlvpn_reorder_adjust_timeout(0.8);
@@ -113,8 +118,8 @@ void mlvpn_reorder_enable()
 
 void mlvpn_reorder_adjust_timeout(double t)
 {
-  reorder_drain_timeout.repeat = t;
-//  printf("rtt %f\n", reorder_drain_timeout.repeat);
+  reorder_drain_timeout.repeat = t;// ((reorder_drain_timeout.repeat*9)+ t)/10;
+  printf("rtt %f\n", reorder_drain_timeout.repeat);
 }
 
 void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
@@ -161,8 +166,11 @@ void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
     TAILQ_INSERT_TAIL(&b->list, p, entry);
   }
 
+  b->list_size++;
+
   if (TAILQ_LAST(&b->list,list_t) && ((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq) > 0)) {
     log_debug("reorder", "got old insert %d behind (probably fluctuating RTT)\n",(int)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq));
+    printf("got old insert %d behind (probably fluctuating RTT)\n",(int)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq));
   }
 
   mlvpn_reorder_drain(); // now see what canbe drained off
@@ -171,27 +179,57 @@ void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
 void mlvpn_reorder_drain()
 {
   struct mlvpn_reorder_buffer *b=reorder_buffer;
-  
+  unsigned int drain_cnt = 0;
   ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat);
-  while (!TAILQ_EMPTY(&b->list) &&
+
+  while
+#if 1
+    (!TAILQ_EMPTY(&b->list) && ((b->list_size>((b->list_size_av*2))) || ((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0))) 
+#else
+    (!TAILQ_EMPTY(&b->list) &&
          (((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0) ||
-          (TAILQ_LAST(&b->list,list_t)->timestamp < cut))) {
+          (TAILQ_LAST(&b->list,list_t)->timestamp < cut)))
+#endif
+    {
+      
     struct pkttailq *l = TAILQ_LAST(&b->list,list_t);
 
-/*    if ((TAILQ_LAST(&b->list,list_t)->timestamp < cut)) {
-      printf("P %lu ",l->pkt.seq);
-    } else {
-      printf("D %lu ",l->pkt.seq);
+    if ((int64_t)(b->min_seqn - l->pkt.seq)<0) {
+      printf("Prune %lu %d %d %fs old",b->min_seqn, b->list_size, b->list_size_av*2, cut - l->timestamp);
+//      mlvpn_tunnel_t *t;
+//      LIST_FOREACH(t, &rtuns, entries) {
+//        printf(" loss on %s=%d ",t->name, mlvpn_loss_ratio(t));
+//      }
+      printf("\n");
     }
-*/  
-    
+
     mlvpn_rtun_inject_tuntap(&l->pkt);
     TAILQ_REMOVE(&b->list, l, entry);
     TAILQ_INSERT_TAIL(&b->pool, l, entry);
-  
+
+    b->list_size--;
+    drain_cnt++;
+
     b->min_seqn=l->pkt.seq+1;
   }
-//  printf("\n");
+  
+  if (drain_cnt > 1) {
+    int last=b->list_size_av;
+    b->list_size_av = ((b->list_size_av*9) + (b->list_size + drain_cnt) + 5)/10;
+    if (b->list_size_av > 64) {
+      b->list_size_av = 64;
+      if (b->list_size_av != last ) {
+        log_info("reorder", "List size reached limit (64)\n");
+      }
+    } 
+    if (b->list_size_av < 4) {
+      b->list_size_av = 4;
+      if (b->list_size_av != last ) {
+        log_debug("reorder", "List size reached limit (4)\n");
+      }
+    } 
+  }
+
   if (TAILQ_EMPTY(&b->list)) {
     ev_timer_stop(EV_A_ &reorder_drain_timeout);
   } else {

@@ -507,6 +507,7 @@ mlvpn_protocol_read(
                 tun->rttvar = (1 - beta) * tun->rttvar + (beta * fabs(tun->srtt - R));
                 tun->srtt = (1 - alpha) * tun->srtt + (alpha * R);
             }
+//            tun->srtt_av=((tun->srtt_av*99.0)+tun->srtt)/100.0;
         }
         log_debug("rtt", "%ums srtt %ums loss ratio: %d",
             (unsigned int)R, (unsigned int)tun->srtt, mlvpn_loss_ratio(tun));
@@ -527,7 +528,12 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     memset(&proto, 0, sizeof(proto));
     mlvpn_pkt_t *pkt = mlvpn_pktbuffer_read(pktbuf);
 
-    pkt->reorder = 1;
+    if (pkt->data[9]==17) {
+      pkt->reorder = 0;
+    } else {
+      pkt->reorder = 1;
+    }
+    
     // should packet inspect, and only re-order TCP packets !
     if (pkt->type == MLVPN_PKT_DATA && pkt->reorder) {
         proto.data_seq = data_seq++;
@@ -688,6 +694,7 @@ mlvpn_rtun_new(const char *name,
     new->saved_timestamp = -1;
     new->saved_timestamp_received_at = 0;
     new->srtt = 1000;
+//    new->srtt_av=1000;
     new->rttvar = 500;
     new->rtt_hit = 0;
     new->seq_last = 0;
@@ -1358,8 +1365,8 @@ mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents)
             * reorder timeout algorithm
             */
             if (!t->fallback_only && t->rtt_hit) {
-                tmp = t->srtt + (4 * t->rttvar);
-                max_srtt = max_srtt > tmp ? max_srtt : tmp;
+              tmp = t->srtt + (4 * t->rttvar);
+              max_srtt = max_srtt > tmp ? max_srtt : tmp;
             }
         }
     }
@@ -1367,7 +1374,7 @@ mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents)
     /* Update the reorder algorithm */
     if (max_srtt > 0) {
         /* Apply a factor to the srtt in order to get a window */
-        max_srtt *= 2.2;
+        max_srtt *= 0.5;
         log_debug("reorder", "adjusting reordering drain timeout to %.0fms",
             max_srtt);
         mlvpn_reorder_adjust_timeout(max_srtt / 1000.0);
