@@ -81,7 +81,7 @@
  * version 0: mlvpn 2.0 to 2.1 
  * version 1: mlvpn 2.2+ (add reorder field in mlvpn_proto_t)
  */
-#define MLVPN_PROTOCOL_VERSION 1
+#define MLVPN_PROTOCOL_VERSION 2
 
 struct mlvpn_options_s
 {
@@ -146,7 +146,9 @@ typedef struct mlvpn_tunnel_s
     int disconnects;      /* is it stable ? */
     int conn_attempts;    /* connection attempts */
     int fallback_only;    /* if set, this link will be used when all others are down */
-    uint32_t loss_tolerence; /* How much loss is acceptable before the link is discarded */
+    uint32_t loss_tolerence; /* How much loss is acceptable before the link is
+                              * discarded */
+    uint16_t sent_loss;   /* loss as reported by far end */
     uint64_t seq;
     uint64_t expected_receiver_seq;
     uint64_t saved_timestamp;

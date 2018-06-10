@@ -40,7 +40,7 @@
 #include "reorder.h"
 #include "log.h"
 
-//#include "mlvpn.h"
+#include "mlvpn.h"
 
 struct pkttailq
 {
@@ -79,8 +79,9 @@ void mlvpn_reorder_drain_timeout(EV_P_ ev_timer *w, int revents)
     if (!TAILQ_EMPTY(&b->list)) {
       b->min_seqn=TAILQ_LAST(&b->list, list_t)->pkt.seq; // Jump over any hole !!!!
     }
-
+    printf("list size %d\n",b->list_size);
     mlvpn_reorder_drain();
+    printf("list size %d\n",b->list_size);
 }
 
 // Called once from main.
@@ -140,9 +141,12 @@ void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
 
   p->timestamp = ev_now(EV_DEFAULT_UC);
 
-  if (!b->is_initialized) {
+  if ((!b->is_initialized) ||
+      (abs((int)(b->min_seqn - pkt->seq)) > b->list_size_av*100))
+  {
     b->min_seqn = pkt->seq;
     b->is_initialized = 1;
+    printf("Init\n");
     log_debug("reorder", "initial sequence: %"PRIu64"", pkt->seq);
   }
 
@@ -183,34 +187,37 @@ void mlvpn_reorder_drain()
   ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat);
 
   while
-#if 1
-    (!TAILQ_EMPTY(&b->list) && ((b->list_size>((b->list_size_av*2))) || ((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0))) 
-#else
     (!TAILQ_EMPTY(&b->list) &&
          (((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0) ||
-          (TAILQ_LAST(&b->list,list_t)->timestamp < cut)))
-#endif
+//          (b->list_size>((b->list_size_av*3)))
+//          (b->list_size > 20)
+          (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
+           ))
     {
       
     struct pkttailq *l = TAILQ_LAST(&b->list,list_t);
 
     if ((int64_t)(b->min_seqn - l->pkt.seq)<0) {
-      printf("Prune %lu %d %d %fs old",b->min_seqn, b->list_size, b->list_size_av*2, cut - l->timestamp);
-//      mlvpn_tunnel_t *t;
-//      LIST_FOREACH(t, &rtuns, entries) {
-//        printf(" loss on %s=%d ",t->name, mlvpn_loss_ratio(t));
-//      }
+      printf("Prune seq %lu min %lu list %d av %d time(from cut) %fs old",l->pkt.seq, b->min_seqn,  b->list_size, b->list_size_av*2, cut - l->timestamp);
+      mlvpn_tunnel_t *t;
+      LIST_FOREACH(t, &rtuns, entries) {
+        printf(" loss on %s=%d ",t->name, mlvpn_loss_ratio(t));
+      }
       printf("\n");
     }
 
     mlvpn_rtun_inject_tuntap(&l->pkt);
+    
     TAILQ_REMOVE(&b->list, l, entry);
     TAILQ_INSERT_TAIL(&b->pool, l, entry);
 
     b->list_size--;
     drain_cnt++;
 
-    b->min_seqn=l->pkt.seq+1;
+    if ((int64_t)(b->min_seqn - l->pkt.seq)<=0) {
+      b->min_seqn=l->pkt.seq+1;
+    }
+    
   }
   
   if (drain_cnt > 1) {

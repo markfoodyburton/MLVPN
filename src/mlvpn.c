@@ -482,9 +482,15 @@ mlvpn_protocol_read(
     if (proto.version >= 1) {
         decap_pkt->reorder = proto.reorder;
         decap_pkt->seq = be64toh(proto.data_seq);
+//        printf("Recieved tun seq %d  data seq %d\n",proto.tun_seq, decap_pkt->seq);
         mlvpn_loss_update(tun, proto.tun_seq);
                          // use the TUN seq number to
                          // calculate loss
+        if (proto.version >=2) {
+          tun->sent_loss=proto.sent_loss;
+        } else {
+          tun->sent_loss=0;
+        }
     } else {
         decap_pkt->reorder = 0;
         decap_pkt->seq = 0;
@@ -509,8 +515,8 @@ mlvpn_protocol_read(
             }
 //            tun->srtt_av=((tun->srtt_av*99.0)+tun->srtt)/100.0;
         }
-        log_debug("rtt", "%ums srtt %ums loss ratio: %d",
-            (unsigned int)R, (unsigned int)tun->srtt, mlvpn_loss_ratio(tun));
+//        log_debug("rtt", "%ums srtt %ums loss ratio: %d",
+//            (unsigned int)R, (unsigned int)tun->srtt, mlvpn_loss_ratio(tun));
     }
     return 0;
 fail:
@@ -528,16 +534,19 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     memset(&proto, 0, sizeof(proto));
     mlvpn_pkt_t *pkt = mlvpn_pktbuffer_read(pktbuf);
 
+    // should packet inspect, and only re-order TCP packets !
     if (pkt->data[9]==17) {
       pkt->reorder = 0;
     } else {
       pkt->reorder = 1;
     }
     
-    // should packet inspect, and only re-order TCP packets !
     if (pkt->type == MLVPN_PKT_DATA && pkt->reorder) {
         proto.data_seq = data_seq++;
+    } else {
+      proto.data_seq = 0;
     }
+    
     wlen = PKTHDRSIZ(proto) + pkt->len;
     proto.len = pkt->len;
     proto.flags = pkt->type;
@@ -548,7 +557,7 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     proto.flow_id = tun->flow_id;
     proto.version = MLVPN_PROTOCOL_VERSION;
     proto.reorder = pkt->reorder;
-
+    proto.sent_loss=mlvpn_loss_ratio(tun);
     /* we have a recent received timestamp */
     if (tun->saved_timestamp != -1) {
       if (now64 - tun->saved_timestamp_received_at < 1000 ) {
@@ -1296,12 +1305,13 @@ mlvpn_rtun_send_disconnect(mlvpn_tunnel_t *t)
 static void
 mlvpn_rtun_check_lossy(mlvpn_tunnel_t *tun)
 {
-    int loss = mlvpn_loss_ratio(tun);
+  int loss = tun->sent_loss;//mlvpn_loss_ratio(tun);
     int status_changed = 0;
     if (loss >= tun->loss_tolerence && tun->status == MLVPN_AUTHOK) {
         log_info("rtt", "%s packet loss reached threashold: %d%%/%d%%",
             tun->name, loss, tun->loss_tolerence);
         tun->status = MLVPN_LOSSY;
+//        mlvpn_rtun_status_down(tun);
         status_changed = 1;
     } else if (loss < tun->loss_tolerence && tun->status == MLVPN_LOSSY) {
         log_info("rtt", "%s packet loss acceptable again: %d%%/%d%%",
@@ -1374,7 +1384,7 @@ mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents)
     /* Update the reorder algorithm */
     if (max_srtt > 0) {
         /* Apply a factor to the srtt in order to get a window */
-        max_srtt *= 0.5;
+        max_srtt *= 2.2;
         log_debug("reorder", "adjusting reordering drain timeout to %.0fms",
             max_srtt);
         mlvpn_reorder_adjust_timeout(max_srtt / 1000.0);
