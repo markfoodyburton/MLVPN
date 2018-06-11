@@ -168,6 +168,7 @@ typedef struct mlvpn_tunnel_s
     uint64_t recvbytes;   /* 64bit bytes recv counter */
     int64_t permitted;  /* how many bytes we can send */
     uint32_t quota; /* how many bytes per second we can send */
+    uint32_t reorder_length;  /* how many packets this tunnel can re-order */
     uint32_t timeout;     /* configured timeout in seconds */
     uint32_t bandwidth;   /* bandwidth in bytes per second */
     circular_buffer_t *sbuf;    /* send buffer */
@@ -205,7 +206,7 @@ mlvpn_tunnel_t *mlvpn_rtun_new(const char *name,
     const char *destaddr, const char *destport,
     int server_mode, uint32_t timeout,
     int fallback_only, uint32_t bandwidth,
-    uint32_t loss_tolerence, uint32_t quota);
+    uint32_t loss_tolerence, uint32_t quota, uint32_t reorder_length);
 void mlvpn_rtun_drop(mlvpn_tunnel_t *t);
 void mlvpn_rtun_status_down(mlvpn_tunnel_t *t);
 #ifdef HAVE_FILTERS

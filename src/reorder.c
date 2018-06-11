@@ -186,25 +186,40 @@ void mlvpn_reorder_drain()
   unsigned int drain_cnt = 0;
   ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat/2);
 
+
+  // If there is no chance of getting a packet (it's older than the latest
+  // packet seen on an ACTIVE  tunnel - the maximum reorder_length),
+  // then consider it lost
   uint64_t oldest=0;
   {
     mlvpn_tunnel_t *t;
     LIST_FOREACH(t, &rtuns, entries) {
-      if (!oldest || t->last_seen < oldest) {
-        oldest=t->last_seen;
+      uint64_t o=b->min_seqn;
+      if (t->reorder_length &&
+          t->status >= MLVPN_AUTHOK &&
+          (t->last_activity > ev_now(EV_DEFAULT_UC)-(t->srtt/1000))
+          ) {
+        o=t->last_seen - t->reorder_length;
+      }
+      if (!oldest || ((int64_t)(oldest-o))>=0) {
+        oldest=o;
       }
     }
-//    oldest+= re-order length
   }
+  if ((int64_t)(b->min_seqn - oldest)>=0) 
+  {
+    oldest=b->min_seqn;
+  }
+
   
+////((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0) ||
   
   while
     (!TAILQ_EMPTY(&b->list) &&
-         (((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0) ||
+         (((int64_t)(oldest - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0) ||
 //          (b->list_size>((b->list_size_av)*2)) ||
 //          (b->list_size > 256) ||
-          (TAILQ_LAST(&b->list,list_t)->timestamp < cut) ||
-          ((int64_t)(TAILQ_LAST(&b->list,list_t)->pkt.seq - oldest)>0)
+          (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
            ))
     {
       

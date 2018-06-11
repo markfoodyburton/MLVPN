@@ -671,7 +671,7 @@ mlvpn_rtun_new(const char *name,
                const char *destaddr, const char *destport,
                int server_mode, uint32_t timeout,
                int fallback_only, uint32_t bandwidth,
-               uint32_t loss_tolerence, uint32_t quota)
+               uint32_t loss_tolerence, uint32_t quota, uint32_t reorder_length)
 {
     mlvpn_tunnel_t *new;
 
@@ -708,6 +708,7 @@ mlvpn_rtun_new(const char *name,
     new->recvbytes = 0;
     new->permitted = 0;
     new->quota = quota;
+    new->reorder_length= reorder_length;
     new->seq = 0;
     new->last_seen = 0;
 //    new->expected_receiver_seq = 0;

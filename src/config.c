@@ -262,6 +262,7 @@ mlvpn_config(int config_file_fd, int first_time)
                 char *dstport;
                 uint32_t bwlimit = 0;
                 uint32_t quota = 0;
+                uint32_t reorder_length = 0;
                 uint32_t timeout = 30;
                 uint32_t loss_tolerence;
                 int create_tunnel = 1;
@@ -309,6 +310,9 @@ mlvpn_config(int config_file_fd, int first_time)
                     NULL, 0);
                 _conf_set_uint_from_conf(
                     config, lastSection, "quota", &quota, 0,
+                    NULL, 0);
+                _conf_set_uint_from_conf(
+                    config, lastSection, "reorder_length", &reorder_length, 0,
                     NULL, 0);
                 _conf_set_uint_from_conf(
                     config, lastSection, "timeout", &timeout, default_timeout,
@@ -378,6 +382,12 @@ mlvpn_config(int config_file_fd, int first_time)
                                 tmptun->name, tmptun->quota, quota);
                             tmptun->quota = quota;
                         }
+                        if (tmptun->reorder_length != reorder_length)
+                        {
+                          log_info("config", "%s reorder length changed from %d to %d",
+                                tmptun->name, tmptun->reorder_length, reorder_length);
+                            tmptun->reorder_length = reorder_length;
+                        }
                         if (tmptun->loss_tolerence != loss_tolerence)
                         {
                             log_info("config", "%s loss tolerence changed from %d%% to %d%%",
@@ -395,7 +405,7 @@ mlvpn_config(int config_file_fd, int first_time)
                     mlvpn_rtun_new(
                         lastSection, bindaddr, bindport, bindfib, dstaddr, dstport,
                         default_server_mode, timeout, fallback_only,
-                        bwlimit, loss_tolerence, quota);
+                        bwlimit, loss_tolerence, quota, reorder_length);
                 }
                 if (bindaddr)
                     free(bindaddr);
