@@ -271,15 +271,17 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
     } else if (seq > tun->seq_last) {
         /* new sequence number -- recent message arrive */
         tun->seq_vect <<= seq - tun->seq_last;
-        if ((seq - tun->seq_last) != 1) {
-          printf("jump %s : %ld\n",tun->name, (int64_t)(seq - tun->seq_last));
-        }
+//        if ((seq - tun->seq_last) != 1) {
+//          printf("jump %s : %ld\n",tun->name, (int64_t)(seq - tun->seq_last));
+//        }
   
         tun->seq_vect |= 1;
         tun->seq_last = seq;
     } else if (seq >= tun->seq_last - 63) {
         tun->seq_vect |= (1 << (tun->seq_last - seq));
-        printf("fill %s : %ld\n",tun->name, (tun->seq_last - seq));
+//        printf("fill %s : %ld\n",tun->name, (tun->seq_last - seq));
+        int d=(tun->seq_last - seq)+1;
+        tun->reorder_length=((tun->reorder_length*9)+d+5)/10;
     }
 }
 
@@ -859,7 +861,11 @@ mlvpn_rtun_recalc_weight_prio()
   double bwneeded=bandwidth*1.5;
   double bwavailable=0;
   LIST_FOREACH(t, &rtuns, entries) {
-    double part=0.8 * ((100.0-t->sent_loss)/100.0);
+    double l=(((double)t->loss_tolerence-(double)t->sent_loss)/100.0);
+    if (l<0) l=0;
+    // effectively, the link is lossy, and will be marked as such later, here,
+    // simply remove the weight from the link.
+    double part=0.8 * l;
     if ((t->quota == 0) && (t->status >= MLVPN_AUTHOK)) {
       mlvpn_rtun_set_weight(t, (t->bandwidth*part));
       bwavailable+=(t->bandwidth*part);
@@ -1422,7 +1428,7 @@ mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents)
     /* Update the reorder algorithm */
     if (max_srtt > 0) {
         /* Apply a factor to the srtt in order to get a window */
-        max_srtt *= 2.2;
+//        max_srtt *= 2.2;
         log_debug("reorder", "adjusting reordering drain timeout to %.0fms",
             max_srtt);
         mlvpn_reorder_adjust_timeout(max_srtt / 1000.0);
