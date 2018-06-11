@@ -120,7 +120,7 @@ void mlvpn_reorder_enable()
 void mlvpn_reorder_adjust_timeout(double t)
 {
   reorder_drain_timeout.repeat = t;// ((reorder_drain_timeout.repeat*9)+ t)/10;
-  printf("rtt %f\n", reorder_drain_timeout.repeat);
+//  printf("rtt %f\n", reorder_drain_timeout.repeat);
 }
 
 void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
@@ -184,24 +184,39 @@ void mlvpn_reorder_drain()
 {
   struct mlvpn_reorder_buffer *b=reorder_buffer;
   unsigned int drain_cnt = 0;
-  ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat);
+  ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat/2);
 
+  uint64_t oldest=0;
+  {
+    mlvpn_tunnel_t *t;
+    LIST_FOREACH(t, &rtuns, entries) {
+      if (!oldest || t->last_seen < oldest) {
+        oldest=t->last_seen;
+      }
+    }
+//    oldest+= re-order length
+  }
+  
+  
   while
     (!TAILQ_EMPTY(&b->list) &&
          (((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0) ||
-//          (b->list_size>((b->list_size_av*3)))
-//          (b->list_size > 20)
-          (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
+//          (b->list_size>((b->list_size_av)*2)) ||
+//          (b->list_size > 256) ||
+          (TAILQ_LAST(&b->list,list_t)->timestamp < cut) ||
+          ((int64_t)(TAILQ_LAST(&b->list,list_t)->pkt.seq - oldest)>0)
            ))
     {
       
     struct pkttailq *l = TAILQ_LAST(&b->list,list_t);
 
     if ((int64_t)(b->min_seqn - l->pkt.seq)<0) {
-      printf("Prune seq %lu min %lu list %d av %d time(from cut) %fs old",l->pkt.seq, b->min_seqn,  b->list_size, b->list_size_av*2, cut - l->timestamp);
+      printf("Prune seq %lu min %lu list %d av %d time(from cut) %fs old",l->pkt.seq, b->min_seqn,  b->list_size, b->list_size_av, cut - l->timestamp);
       mlvpn_tunnel_t *t;
       LIST_FOREACH(t, &rtuns, entries) {
-        printf(" loss on %s=%d ",t->name, mlvpn_loss_ratio(t));
+        if (t->status == MLVPN_AUTHOK) {
+          printf(" loss on %s=%d ",t->name, mlvpn_loss_ratio(t));
+        }
       }
       printf("\n");
     }

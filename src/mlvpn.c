@@ -271,10 +271,15 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
     } else if (seq > tun->seq_last) {
         /* new sequence number -- recent message arrive */
         tun->seq_vect <<= seq - tun->seq_last;
+        if ((seq - tun->seq_last) != 1) {
+          printf("jump %s : %ld\n",tun->name, (int64_t)(seq - tun->seq_last));
+        }
+  
         tun->seq_vect |= 1;
         tun->seq_last = seq;
     } else if (seq >= tun->seq_last - 63) {
         tun->seq_vect |= (1 << (tun->seq_last - seq));
+        printf("fill %s : %ld\n",tun->name, (tun->seq_last - seq));
     }
 }
 
@@ -421,6 +426,8 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
         } else if (decap_pkt.type == MLVPN_PKT_AUTH ||
                 decap_pkt.type == MLVPN_PKT_AUTH_OK) {
             mlvpn_rtun_send_auth(tun);
+        } else {
+          log_warnx("protocol", "Unknown packet type %d\n", decap_pkt.type);
         }
     }
 }
@@ -491,6 +498,9 @@ mlvpn_protocol_read(
         } else {
           tun->sent_loss=0;
         }
+        if (decap_pkt->reorder && decap_pkt->seq > tun->last_seen) {
+          tun->last_seen=decap_pkt->seq;
+        }
     } else {
         decap_pkt->reorder = 0;
         decap_pkt->seq = 0;
@@ -535,13 +545,13 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     mlvpn_pkt_t *pkt = mlvpn_pktbuffer_read(pktbuf);
 
     // should packet inspect, and only re-order TCP packets !
-    if (pkt->data[9]==17) {
+    if (pkt->type == MLVPN_PKT_DATA && pkt->data[9]==17) {
       pkt->reorder = 0;
     } else {
       pkt->reorder = 1;
     }
     
-    if (pkt->type == MLVPN_PKT_DATA && pkt->reorder) {
+    if (pkt->reorder) {
         proto.data_seq = data_seq++;
     } else {
       proto.data_seq = 0;
@@ -699,7 +709,8 @@ mlvpn_rtun_new(const char *name,
     new->permitted = 0;
     new->quota = quota;
     new->seq = 0;
-    new->expected_receiver_seq = 0;
+    new->last_seen = 0;
+//    new->expected_receiver_seq = 0;
     new->saved_timestamp = -1;
     new->saved_timestamp_received_at = 0;
     new->srtt = 1000;
@@ -847,6 +858,28 @@ mlvpn_rtun_recalc_weight_prio()
   double bwneeded=bandwidth*1.5;
   double bwavailable=0;
   LIST_FOREACH(t, &rtuns, entries) {
+    double part=0.8 * ((100.0-t->sent_loss)/100.0);
+    if ((t->quota == 0) && (t->status >= MLVPN_AUTHOK)) {
+      mlvpn_rtun_set_weight(t, (t->bandwidth*part));
+      bwavailable+=(t->bandwidth*part);
+    } else {
+      double bw=bwneeded - bwavailable;
+      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth*3)) && (t->status >= MLVPN_AUTHOK)) {
+        if (t->bandwidth*part > bw) {
+          mlvpn_rtun_set_weight(t, (bw*part));
+          bwavailable+=bw*part;
+        } else {
+          mlvpn_rtun_set_weight(t, (t->bandwidth*part));
+          bwavailable+=(t->bandwidth*part);
+        }
+      } else {
+        mlvpn_rtun_set_weight(t, 0);
+      }
+    }
+  }
+  
+#if 0
+  LIST_FOREACH(t, &rtuns, entries) {
     if ((t->quota == 0) && (t->status >= MLVPN_AUTHOK)) {
       mlvpn_rtun_set_weight(t, (t->bandwidth*80));
       bwavailable+=(t->bandwidth*0.8);
@@ -867,6 +900,10 @@ mlvpn_rtun_recalc_weight_prio()
   }
   LIST_FOREACH(t, &rtuns, entries) {
     mlvpn_rtun_set_weight(t, (t->weight/bwavailable));
+  }
+#endif
+  LIST_FOREACH(t, &rtuns, entries) {
+    mlvpn_rtun_set_weight(t, (t->weight/bwavailable)*100);
   }
   if (bwavailable==0) {
     return mlvpn_rtun_recalc_weight_bw();
