@@ -285,38 +285,6 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
     }
 }
 
-
-#if 0
-{
-// If a tunnel moves forward, leaving a 'hole' - then we GUESS the hole is for
-// the other tunnel, and if it's not filled in, will be a loss marked for the
-// other tunnel.
-  
-  mlvpn_tunnel_t *t;
-  LIST_FOREACH(t, &rtuns, entries) {
-    
-    if (seq > t->seq_last + 64) {
-      /* consider a connection reset. */
-      t->seq_vect = (uint64_t) -1;
-      t->seq_last = seq;
-    } else if (seq > t->seq_last) {
-      /* new sequence number -- recent message arrive */
-      t->seq_vect <<= seq - t->seq_last;
-      if (t==tun) {
-        t->seq_vect |= ~((uint64_t)-1<<(seq - t->seq_last));
-        // If I move it forward, I claim all the other holes are somebody elses
-        // problem to fill in...., so not my error !
-      } else {
-        t->seq_vect |= 1;
-      }
-      t->seq_last = seq;
-    } else if (seq >= t->seq_last - 63) {
-      t->seq_vect |= (1 << (t->seq_last - seq));
-    }
-  } 
-}
-#endif
-
 int
 mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
 {
@@ -372,7 +340,7 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
         tun->recvbytes += len;
         tun->recvpackets += 1;
         if (tun->quota) {
-          tun->permitted -= len;
+          tun->permitted -= (len + 46 /*UDP over Ethernet overhead*/);
         }
 
         if (! tun->addrinfo)
@@ -525,7 +493,7 @@ mlvpn_protocol_read(
                 tun->rttvar = (1 - beta) * tun->rttvar + (beta * fabs(tun->srtt - R));
                 tun->srtt = (1 - alpha) * tun->srtt + (alpha * R);
             }
-//            tun->srtt_av=((tun->srtt_av*99.0)+tun->srtt)/100.0;
+            tun->srtt_av=((tun->srtt_av*999.0)+tun->srtt)/1000.0;
         }
 //        log_debug("rtt", "%ums srtt %ums loss ratio: %d",
 //            (unsigned int)R, (unsigned int)tun->srtt, mlvpn_loss_ratio(tun));
@@ -634,7 +602,7 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
         tun->sentpackets++;
         tun->sentbytes += ret;
         if (tun->quota) {
-          tun->permitted -= ret;
+          tun->permitted -= (ret + 46 /*UDP over Ethernet overhead*/);
         }
 
         if (wlen != ret)
@@ -717,7 +685,7 @@ mlvpn_rtun_new(const char *name,
     new->saved_timestamp = -1;
     new->saved_timestamp_received_at = 0;
     new->srtt = 1000;
-//    new->srtt_av=1000;
+    new->srtt_av=1000;
     new->rttvar = 500;
     new->rtt_hit = 0;
     new->seq_last = 0;
@@ -814,40 +782,6 @@ mlvpn_rtun_recalc_weight_srtt()
     }
 }
 
-/* Based on tunnel bandwidth, compute a "weight" value
- * to balance correctly the round robin rtun_choose.
- */
-static void
-mlvpn_rtun_recalc_weight_bw()
-{
-  mlvpn_tunnel_t *t;
-  int unset=0;
-  uint32_t bandwidth_total = 0;
-
-  LIST_FOREACH(t, &rtuns, entries)
-  {
-    if (t->bandwidth == 0)
-      unset++;
-    bandwidth_total += t->bandwidth;
-  }
-  if (unset) {
-    return mlvpn_rtun_recalc_weight_srtt();
-  } else {
-    LIST_FOREACH(t, &rtuns, entries)
-    {
-      /* useless, but we want to be sure not to divide by 0 ! */
-      if (t->bandwidth > 0 && bandwidth_total > 0)
-      {
-        mlvpn_rtun_set_weight(t, (((double)t->bandwidth /
-                                   (double)bandwidth_total) * 100.0));
-        log_debug("wrr", "%s weight = %f (%u %u)", t->name, t->weight,
-                  t->bandwidth, bandwidth_total);
-      }
-    }
-  }   
-}
-
-
 /* Based on tunnel bandwidth, with priority compute a "weight" value
  * to balance correctly the round robin rtun_choose.
  */
@@ -855,17 +789,28 @@ static void
 mlvpn_rtun_recalc_weight_prio()
 {
   if (bandwidth<=0) {
-    return mlvpn_rtun_recalc_weight_bw();
+// When there is no bandwdith, anything that comes through, share out in
+// proportion to srtt - this should give us the fastest pickup.
+    return mlvpn_rtun_recalc_weight_srtt();
   }
+  
   mlvpn_tunnel_t *t;
-  double bwneeded=bandwidth*1.5;
+  double bwneeded=bandwidth; /* do we need headroom e.g. * 1.5*/;
   double bwavailable=0;
   LIST_FOREACH(t, &rtuns, entries) {
-    double l=(((double)t->loss_tolerence-(double)t->sent_loss)/100.0);
-    if (l<0) l=0;
+    if (t->bandwidth == 0) // bail out, we need to know the bandwidths to share
+      return mlvpn_rtun_recalc_weight_srtt();
+
+    double part=(((double)t->loss_tolerence-(double)t->sent_loss)/100.0);
+    if (part<0) part=0;
     // effectively, the link is lossy, and will be marked as such later, here,
     // simply remove the weight from the link.
-    double part=0.8 * l;
+
+    //    as srtt rises above the average, pull down the weight
+    if (t->srtt > t->srtt_av*1.5) {
+      part *= (t->srtt_av*1.5)/t->srtt;
+    } 
+    // Should we limit to e.g. 0.8 of the bandwidth here?
     if ((t->quota == 0) && (t->status >= MLVPN_AUTHOK)) {
       mlvpn_rtun_set_weight(t, (t->bandwidth*part));
       bwavailable+=(t->bandwidth*part);
@@ -885,35 +830,11 @@ mlvpn_rtun_recalc_weight_prio()
     }
   }
   
-#if 0
-  LIST_FOREACH(t, &rtuns, entries) {
-    if ((t->quota == 0) && (t->status >= MLVPN_AUTHOK)) {
-      mlvpn_rtun_set_weight(t, (t->bandwidth*80));
-      bwavailable+=(t->bandwidth*0.8);
-    } else {
-      double bw=bwneeded - bwavailable;
-      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth*3)) && (t->status >= MLVPN_AUTHOK)) {
-        if (t->bandwidth*0.8 > bw) {
-          mlvpn_rtun_set_weight(t, (bw*100));
-          bwavailable+=bw;
-        } else {
-          mlvpn_rtun_set_weight(t, (t->bandwidth*80));
-          bwavailable+=(t->bandwidth*0.8);
-        }
-      } else {
-        mlvpn_rtun_set_weight(t, 0);
-      }
-    }
-  }
-  LIST_FOREACH(t, &rtuns, entries) {
-    mlvpn_rtun_set_weight(t, (t->weight/bwavailable));
-  }
-#endif
   LIST_FOREACH(t, &rtuns, entries) {
     mlvpn_rtun_set_weight(t, (t->weight/bwavailable)*100);
   }
   if (bwavailable==0) {
-    return mlvpn_rtun_recalc_weight_bw();
+    return mlvpn_rtun_recalc_weight_srtt();
   }
 }
 

@@ -67,7 +67,8 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl);
     "   \"recvbytes\": %" PRIu64 ",\n" \
     "   \"bandwidth\": %u,\n" \
     "   \"srtt\": %u,\n" \
-    "   \"loss\": %u,\n" \
+    "   \"lossin\": %u,\n" \
+    "   \"lossout\": %u,\n" \
     "   \"permitted\": %u,\n" \
     "   \"disconnects\": %u,\n" \
     "   \"last_packet\": %u,\n" \
@@ -429,8 +430,8 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl)
                        t->recvbytes,
                        0,
                        (uint32_t)t->srtt,
+                       mlvpn_loss_ratio(t),
                        t->sent_loss,
-//                       mlvpn_loss_ratio(t),
                        (uint32_t)(t->permitted/1000000),
                        t->disconnects,
                        (uint32_t)t->last_activity,
