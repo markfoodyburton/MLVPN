@@ -515,10 +515,12 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     mlvpn_pkt_t *pkt = mlvpn_pktbuffer_read(pktbuf);
 
     // should packet inspect, and only re-order TCP packets !
-    if (pkt->type == MLVPN_PKT_DATA && pkt->data[9]==17) {
-      pkt->reorder = 0;
-    } else {
+    // 17 - UDP
+    // 6 - TCP
+    if (pkt->type == MLVPN_PKT_DATA && pkt->data[9]==6) {
       pkt->reorder = 1;
+    } else {
+      pkt->reorder = 0;
     }
     
     if (pkt->reorder) {
