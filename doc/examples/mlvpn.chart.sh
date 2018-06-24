@@ -36,6 +36,11 @@ EOF
     wget -q -O - 127.0.0.1:1040/status | perl -e 'use Data::Dumper; use JSON;local $/ = undef;$data = decode_json(<>); $ts=$data->{'tunnels'};foreach $i (@$ts) { print  "DIMENSION ".$i->{"name"}." ".$i->{"name"}." incremental 1 125\n"; }'
 
     cat <<EOF
+CHART mlvpn.bandwidth_out '' "MLVPN Outbound Bandwidth" "kbits/s" '' '' line 1 ''
+DIMENSION bandwidth bandwidth absolute
+EOF
+    
+    cat <<EOF
 CHART mlvpn.outbound_p '' "MLVPN Outbound Traffic breakdown" "%" '' '' stacked 3 ''
 EOF
     wget -q -O - 127.0.0.1:1040/status | perl -e 'use Data::Dumper; use JSON;local $/ = undef;$data = decode_json(<>); $ts=$data->{'tunnels'};foreach $i (@$ts) { print  "DIMENSION ".$i->{"name"}." ".$i->{"name"}." percentage-of-incremental-row\n"; }'
@@ -87,6 +92,9 @@ mlvpn_update() {
 #    wget -q -O - 127.0.0.1:1040/status | perl -e 'use Data::Dumper; use JSON;local $/ = undef;$data = decode_json(<>); $ts=$data->{'tunnels'};foreach $i (@$ts) { print  "SET ".$i->{"name"}." = ". $i->{"recvbytes"}."\n"; }'
 
     wget -q -O - 127.0.0.1:1040/status | perl -e 'use Data::Dumper; use JSON;$arg="'$1'";local $/ = undef;$data = decode_json(<>); $ts=$data->{'tunnels'};
+print "BEGIN mlvpn.bandwidth_out $arg\n";
+print "SET bandwidth = ".$data->{'bandwidth_out'}."\n";
+print "END\n";
 print "BEGIN mlvpn.inbound $arg\n";
 foreach $i (@$ts) { print  "SET ".$i->{"name"}." = ". $i->{"recvbytes"}."\n"; }
 print "END\n";
