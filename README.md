@@ -159,6 +159,7 @@ Contributors
   * Stuart Henderson, contributor (OpenBSD port/package)
   * Olivier Cochard-Labbé, contributor (FreeBSD/OpenBSD fib routing)
   * Michael Stapelberg, contributor (documentation)
+  * Mark Burton, contributor (Reorder buffer re-write)
 
 LICENSE
 =======

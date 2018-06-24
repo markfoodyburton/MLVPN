@@ -797,13 +797,12 @@ mlvpn_rtun_recalc_weight_prio()
   }
   
   mlvpn_tunnel_t *t;
-  double bwneeded=bandwidth; /* do we need headroom e.g. * 1.5*/;
+  double bwneeded=bandwidth * 1.5; /* do we need headroom e.g. * 1.5*/;
   double bwavailable=0;
   LIST_FOREACH(t, &rtuns, entries) {
     if (t->bandwidth == 0) // bail out, we need to know the bandwidths to share
       return mlvpn_rtun_recalc_weight_srtt();
-
-    double part=(((double)t->loss_tolerence-(double)t->sent_loss)/100.0);
+    double part = ((((double)t->loss_tolerence-(double)t->sent_loss)*(100/(double)t->loss_tolerence))/100.0);
     if (part<0) part=0;
     // effectively, the link is lossy, and will be marked as such later, here,
     // simply remove the weight from the link.
@@ -811,7 +810,7 @@ mlvpn_rtun_recalc_weight_prio()
     //    as srtt rises above the average, pull down the weight
     if (t->srtt > t->srtt_av*1.5) {
       part *= (t->srtt_av*1.5)/t->srtt;
-    } 
+    }
     // Should we limit to e.g. 0.8 of the bandwidth here?
     if ((t->quota == 0) && (t->status >= MLVPN_AUTHOK)) {
       mlvpn_rtun_set_weight(t, (t->bandwidth*part));

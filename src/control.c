@@ -30,6 +30,7 @@
 extern struct tuntap_s tuntap;
 extern char *_progname;
 extern struct mlvpn_status_s mlvpn_status;
+extern double bandwidth;
 void mlvpn_control_write_status(struct mlvpn_control *ctrl);
 
 
@@ -51,6 +52,7 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl);
     "   \"type\": \"%s\",\n" \
     "   \"name\": \"%s\"\n" \
     "},\n" \
+    "\"bandwidth_out\": %f,\n" \
     "\"tunnels\": [\n"
 
 #define JSON_STATUS_RTUN "{\n" \
@@ -397,7 +399,8 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl)
         (uint32_t) mlvpn_status.last_reload,
         0,
         tuntap.type == MLVPN_TUNTAPMODE_TUN ? "tun" : "tap",
-        tuntap.devname
+        tuntap.devname,
+        bandwidth
     );
     mlvpn_control_write(ctrl, buf, ret);
     LIST_FOREACH(t, &rtuns, entries)
