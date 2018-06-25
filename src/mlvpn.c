@@ -340,7 +340,11 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
         tun->recvbytes += len;
         tun->recvpackets += 1;
         if (tun->quota) {
-          tun->permitted -= (len + 46 /*UDP over Ethernet overhead*/);
+          if (tun->permitted > (len + 46)) {
+            tun->permitted -= (len + 46 /*UDP over Ethernet overhead*/);
+          } else {
+            tun->permitted = 0;
+          }
         }
 
         if (! tun->addrinfo)
@@ -604,7 +608,11 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
         tun->sentpackets++;
         tun->sentbytes += ret;
         if (tun->quota) {
-          tun->permitted -= (ret + 46 /*UDP over Ethernet overhead*/);
+          if (tun->permitted > (ret + 46)) {
+            tun->permitted -= (ret + 46 /*UDP over Ethernet overhead*/);
+          } else {
+            tun->permitted = 0;
+          }
         }
 
         if (wlen != ret)
