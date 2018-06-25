@@ -71,6 +71,7 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl);
     "   \"srtt\": %u,\n" \
     "   \"lossin\": %u,\n" \
     "   \"lossout\": %u,\n" \
+    "   \"reorder_length\": %u,\n"     \
     "   \"permitted\": %u,\n" \
     "   \"disconnects\": %u,\n" \
     "   \"last_packet\": %u,\n" \
@@ -435,6 +436,7 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl)
                        (uint32_t)t->srtt,
                        mlvpn_loss_ratio(t),
                        t->sent_loss,
+                       t->reorder_length,
                        (uint32_t)(t->permitted/1000000),
                        t->disconnects,
                        (uint32_t)t->last_activity,

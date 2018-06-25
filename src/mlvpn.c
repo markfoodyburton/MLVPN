@@ -274,17 +274,28 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
 //        if ((seq - tun->seq_last) != 1) {
 //          printf("jump %s : %ld\n",tun->name, (int64_t)(seq - tun->seq_last));
 //        }
-  
+        // lets assume we do manage to fill all this in. The this number is the
+        // re-order length.
+        
         tun->seq_vect |= 1;
         tun->seq_last = seq;
     } else if (seq >= tun->seq_last - 63) {
         tun->seq_vect |= (1 << (tun->seq_last - seq));
 //        printf("fill %s : %ld\n",tun->name, (tun->seq_last - seq));
         int d=(tun->seq_last - seq)+1;
-        tun->reorder_length=((tun->reorder_length*9)+d+5)/10;
+        if (tun->reorder_length <= d) {
+          tun->reorder_length = d;
+        } else {
+          if (tun->reorder_length > (d*2)) {
+            tun->reorder_length --;
+          }
+        }
+//        tun->reorder_length=((tun->reorder_length*9)+d+5)/10;
     }
 }
 
+// this isn't the loss ration  because you could have perfectly valid
+// 'holes'... which will be filled in by re-ordering....
 int
 mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
 {
@@ -294,7 +305,7 @@ mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
   int loss = 0;
   unsigned int i;
   /* Count zeroes */
-  for (i = 0; i < 64; i++) {
+  for (i = tun->reorder_length; i < 64; i++) {
     if ( (1 & (tun->seq_vect >> i)) == 0 ) {
       loss++;
     }
