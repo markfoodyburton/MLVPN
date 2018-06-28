@@ -265,11 +265,30 @@ static void
 mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
 {
   if (seq > tun->seq_last + 64) {
-        /* consider a connection reset. */
-        tun->seq_vect = (uint64_t) -1;
-        tun->seq_last = seq;
-    } else if (seq > tun->seq_last) {
-        /* new sequence number -- recent message arrive */
+    /* consider a connection reset. */
+    tun->seq_vect = (uint64_t) -1;
+    tun->seq_last = seq;
+    tun->loss = 0;
+  } else if (seq > tun->seq_last) {
+    /* new sequence number -- recent message arrive */
+    for (int i=0;i<seq-tun->seq_last;i++) {
+      if ((tun->seq_vect & (1ul<<63))==0) {
+        tun->loss--; // We're nolonger counting that loss it happend some time
+                     // ago (or the re-order is HUGE!
+      }
+      tun->seq_vect<<=1;
+      tun->loss++;
+    }
+    tun->seq_vect |= 1;
+    tun->loss--;
+    tun->seq_last = seq;
+
+    if (tun->loss == 0) {
+      if (tun->reorder_length > tun->reorder_length_preset) {
+        tun->reorder_length--;
+      }
+    }
+#if 0    
         tun->seq_vect <<= seq - tun->seq_last;
 //        if ((seq - tun->seq_last) != 1) {
 //          printf("jump %s : %ld\n",tun->name, (int64_t)(seq - tun->seq_last));
@@ -279,19 +298,27 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
         
         tun->seq_vect |= 1;
         tun->seq_last = seq;
+#endif
     } else if (seq >= tun->seq_last - 63) {
         tun->seq_vect |= (1 << (tun->seq_last - seq));
+        if (tun->loss>0) tun->loss--;
+        
 //        printf("fill %s : %ld\n",tun->name, (tun->seq_last - seq));
         int d=(tun->seq_last - seq)+1;
         if (tun->reorder_length <= d) {
           tun->reorder_length = d;
-        } else {
-          if (tun->reorder_length > (d*2)) {
-            tun->reorder_length --;
-          }
+//        } else {
+//          if (tun->reorder_length > (d*2)) {
+//            tun->reorder_length --;
+//          }
         }
 //        tun->reorder_length=((tun->reorder_length*9)+d+5)/10;
-    }
+  } else {
+    /* consider a wrap round. */
+    tun->seq_vect = (uint64_t) -1;
+    tun->seq_last = seq;
+    tun->loss = 0;
+  }
 }
 
 // this isn't the loss ration  because you could have perfectly valid
@@ -302,6 +329,7 @@ mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
   if (tun->status < MLVPN_AUTHOK) {
     return 0; // for links that are down, report a 0 loss.
   } 
+#if 0
   int loss = 0;
   unsigned int i;
   /* Count zeroes */
@@ -310,6 +338,19 @@ mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
       loss++;
     }
   }
+  if (tun->loss != loss) {
+  printf("Loss: %d %d\n", tun->loss, loss);
+  }
+#endif
+  int loss = tun->loss;
+  /* remove things in the reorder_length 'shadow' */
+  for (int i=0;i < tun->reorder_length; i++) {
+    if ( (1 & (tun->seq_vect >> i)) == 0 ) {
+      loss--;
+    }
+  }
+  if (loss < 0) loss=0;
+    
   return (loss * 100) / 64;
 }
 
@@ -700,6 +741,7 @@ mlvpn_rtun_new(const char *name,
     new->permitted = 0;
     new->quota = quota;
     new->reorder_length= reorder_length;
+    new->reorder_length_preset= reorder_length;
     new->seq = 0;
     new->last_seen = 0;
 //    new->expected_receiver_seq = 0;
@@ -711,6 +753,7 @@ mlvpn_rtun_new(const char *name,
     new->rtt_hit = 0;
     new->seq_last = 0;
     new->seq_vect = (uint64_t) -1;
+    new->loss = 0;
     new->flow_id = crypto_nonce_random();
     new->bandwidth = bandwidth;
     new->fallback_only = fallback_only;

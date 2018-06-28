@@ -262,7 +262,7 @@ mlvpn_config(int config_file_fd, int first_time)
                 char *dstport;
                 uint32_t bwlimit = 0;
                 uint32_t quota = 0;
-                uint32_t reorder_length = 0;
+                uint32_t reorder_length = 5;
                 uint32_t timeout = 30;
                 uint32_t loss_tolerence;
                 int create_tunnel = 1;
@@ -312,7 +312,7 @@ mlvpn_config(int config_file_fd, int first_time)
                     config, lastSection, "quota", &quota, 0,
                     NULL, 0);
                 _conf_set_uint_from_conf(
-                    config, lastSection, "reorder_length", &reorder_length, 0,
+                    config, lastSection, "reorder_length", &reorder_length, 5,
                     NULL, 0);
                 _conf_set_uint_from_conf(
                     config, lastSection, "timeout", &timeout, default_timeout,
@@ -382,11 +382,11 @@ mlvpn_config(int config_file_fd, int first_time)
                                 tmptun->name, tmptun->quota, quota);
                             tmptun->quota = quota;
                         }
-                        if (tmptun->reorder_length != reorder_length)
+                        if (tmptun->reorder_length_preset != reorder_length)
                         {
                           log_info("config", "%s reorder length changed from %d to %d",
-                                tmptun->name, tmptun->reorder_length, reorder_length);
-                            tmptun->reorder_length = reorder_length;
+                                tmptun->name, tmptun->reorder_length_preset, reorder_length);
+                            tmptun->reorder_length_preset = reorder_length;
                         }
                         if (tmptun->loss_tolerence != loss_tolerence)
                         {

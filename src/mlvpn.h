@@ -148,6 +148,7 @@ typedef struct mlvpn_tunnel_s
     int fallback_only;    /* if set, this link will be used when all others are down */
     uint32_t loss_tolerence; /* How much loss is acceptable before the link is
                               * discarded */
+    uint16_t loss;        /* our loss */
     uint16_t sent_loss;   /* loss as reported by far end */
     uint64_t seq;
 //    uint64_t expected_receiver_seq;
@@ -168,6 +169,7 @@ typedef struct mlvpn_tunnel_s
     uint64_t recvbytes;   /* 64bit bytes recv counter */
     int64_t permitted;  /* how many bytes we can send */
     uint32_t quota; /* how many bytes per second we can send */
+    uint32_t reorder_length_preset;  /* minimum  packets this tunnel can re-order */
     uint32_t reorder_length;  /* how many packets this tunnel can re-order */
     uint32_t timeout;     /* configured timeout in seconds */
     uint32_t bandwidth;   /* bandwidth in bytes per second */
