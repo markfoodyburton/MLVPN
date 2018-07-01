@@ -281,38 +281,64 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
     }
     tun->seq_vect |= 1;
     tun->loss--;
+
+#if 1
+    {
+      int l=0;
+      for (int i=0;i < 64; i++) {
+        if ( (1 & (tun->seq_vect >> i)) == 0 ) {
+          l++;
+        }
+      }
+      if (l!=tun->loss) {
+        printf("Loss jump %s: %lx full %d incremental %d length %d seq %lu last %lu diff %lu\n", tun->name, tun->seq_vect, l, tun->loss, tun->reorder_length, seq, tun->seq_last, seq-tun->seq_last);
+      }
+    }
+#endif
     tun->seq_last = seq;
 
-    if (tun->loss == 0) {
+    if (tun->loss) {
+      int n=0;
+      for (int i=0;i < tun->reorder_length+2; i++) {
+        if ( (1 & (tun->seq_vect >> i)) == 0 ) {
+          n++;
+        }
+      }
+      if (n==0) {
+        // We're looking good, the fact that we had a loss would have been
+        // recorded, time to clear it off
+        tun->seq_vect = (uint64_t) -1;
+        tun->loss = 0;
+      }
+    } else {
       if (tun->reorder_length > tun->reorder_length_preset) {
         tun->reorder_length--;
       }
     }
-#if 0    
-        tun->seq_vect <<= seq - tun->seq_last;
-//        if ((seq - tun->seq_last) != 1) {
-//          printf("jump %s : %ld\n",tun->name, (int64_t)(seq - tun->seq_last));
-//        }
-        // lets assume we do manage to fill all this in. The this number is the
-        // re-order length.
-        
-        tun->seq_vect |= 1;
-        tun->seq_last = seq;
-#endif
     } else if (seq >= tun->seq_last - 63) {
+      if ((tun->seq_vect & (1 << (tun->seq_last - seq)))==0) {
         tun->seq_vect |= (1 << (tun->seq_last - seq));
-        if (tun->loss>0) tun->loss--;
-        
+        tun->loss--;
+      }
+  
+#if 1
+      {
+          int l=0;
+          for (int i=0;i < 64; i++) {
+            if ( (1 & (tun->seq_vect >> i)) == 0 ) {
+              l++;
+            }
+          }
+          if (l!=tun->loss) {
+            printf("Loss fill %s: %lx full %d incremental %d length %d seq %lu last %lu diff %lu\n",tun->name, tun->seq_vect, l, tun->loss, tun->reorder_length, seq, tun->seq_last, tun->seq_last-seq);
+          }
+        }
+#endif
 //        printf("fill %s : %ld\n",tun->name, (tun->seq_last - seq));
         int d=(tun->seq_last - seq)+1;
         if (tun->reorder_length <= d) {
           tun->reorder_length = d;
-//        } else {
-//          if (tun->reorder_length > (d*2)) {
-//            tun->reorder_length --;
-//          }
         }
-//        tun->reorder_length=((tun->reorder_length*9)+d+5)/10;
   } else {
     /* consider a wrap round. */
     tun->seq_vect = (uint64_t) -1;
@@ -329,19 +355,6 @@ mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
   if (tun->status < MLVPN_AUTHOK) {
     return 0; // for links that are down, report a 0 loss.
   } 
-#if 0
-  int loss = 0;
-  unsigned int i;
-  /* Count zeroes */
-  for (i = tun->reorder_length; i < 64; i++) {
-    if ( (1 & (tun->seq_vect >> i)) == 0 ) {
-      loss++;
-    }
-  }
-  if (tun->loss != loss) {
-  printf("Loss: %d %d\n", tun->loss, loss);
-  }
-#endif
   int loss = tun->loss;
   /* remove things in the reorder_length 'shadow' */
   for (int i=0;i < tun->reorder_length; i++) {
@@ -350,7 +363,26 @@ mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
     }
   }
   if (loss < 0) loss=0;
-    
+
+#if 1
+  int floss = 0;
+  /* Count zeroes */
+  for (int i = tun->reorder_length; i < 64; i++) {
+    if ( (1 & (tun->seq_vect >> i)) == 0 ) {
+      floss++;
+    }
+  }
+  if (loss != floss) {
+    printf("Loss: %lx full %d incremental %d length %d\n", tun->seq_vect, floss, loss, tun->reorder_length);
+    tun->loss=0;
+    for (int i=0;i < 64; i++) {
+      if ( (1 & (tun->seq_vect >> i)) == 0 ) {
+        tun->loss++;
+      }
+    }
+  }
+#endif
+  
   return (loss * 100) / 64;
 }
 
@@ -515,7 +547,6 @@ mlvpn_protocol_read(
     if (proto.version >= 1) {
         decap_pkt->reorder = proto.reorder;
         decap_pkt->seq = be64toh(proto.data_seq);
-//        printf("Recieved tun seq %d  data seq %d\n",proto.tun_seq, decap_pkt->seq);
         mlvpn_loss_update(tun, proto.tun_seq);
                          // use the TUN seq number to
                          // calculate loss
@@ -538,18 +569,21 @@ mlvpn_protocol_read(
     if (proto.timestamp_reply != (uint16_t)-1) {
         uint16_t now16 = mlvpn_timestamp16(now64);
         double R = mlvpn_timestamp16_diff(now16, proto.timestamp_reply);
-        if (R < 5000) { /* ignore large values, e.g. server was Ctrl-Zed */
-            if (!tun->rtt_hit) { /* first measurement */
+        if ((R < 5000) && (tun->loss==0)) { /* ignore large values, e.g. server
+                                             * was Ctrl-Zed, and while there
+                                             * are losses, the values will be wrong! */
+            if (tun->rtt_hit<5) { /* first measurement */
                 tun->srtt = R;
                 tun->rttvar = R / 2;
-                tun->rtt_hit = 1;
+                tun->rtt_hit ++;
             } else {
                 const double alpha = 1.0 / 8.0;
                 const double beta = 1.0 / 4.0;
                 tun->rttvar = (1 - beta) * tun->rttvar + (beta * fabs(tun->srtt - R));
                 tun->srtt = (1 - alpha) * tun->srtt + (alpha * R);
             }
-            tun->srtt_av=((tun->srtt_av*999.0)+tun->srtt)/1000.0;
+            tun->srtt_av_d+=tun->srtt + (4*tun->rttvar);
+            tun->srtt_av_c++;
         }
 //        log_debug("rtt", "%ums srtt %ums loss ratio: %d",
 //            (unsigned int)R, (unsigned int)tun->srtt, mlvpn_loss_ratio(tun));
@@ -601,7 +635,7 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
       if (now64 - tun->saved_timestamp_received_at < 1000 ) {
         /* send "corrected" timestamp advanced by how long we held it */
         /* Cast to uint16_t there intentional */
-        proto.timestamp_reply = tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at);
+        proto.timestamp_reply = tun->saved_timestamp - (now64 - tun->saved_timestamp_received_at);
         tun->saved_timestamp = -1;
         tun->saved_timestamp_received_at = 0;
       } else {
@@ -666,6 +700,7 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
             tun->permitted = 0;
           }
         }
+        tun->bm_data += ret;
 
         if (wlen != ret)
         {
@@ -702,8 +737,9 @@ mlvpn_rtun_new(const char *name,
                const char *bindaddr, const char *bindport, uint32_t bindfib,
                const char *destaddr, const char *destport,
                int server_mode, uint32_t timeout,
-               int fallback_only, uint32_t bandwidth,
-               uint32_t loss_tolerence, uint32_t quota, uint32_t reorder_length)
+               int fallback_only, uint32_t bandwidth_max,
+               uint32_t loss_tolerence, uint32_t quota,
+               uint32_t reorder_length, uint32_t srtt_target)
 {
     mlvpn_tunnel_t *new;
 
@@ -747,15 +783,22 @@ mlvpn_rtun_new(const char *name,
 //    new->expected_receiver_seq = 0;
     new->saved_timestamp = -1;
     new->saved_timestamp_received_at = 0;
-    new->srtt = 1000;
-    new->srtt_av=1000;
-    new->rttvar = 500;
+    new->srtt_target=srtt_target;
+    new->srtt = 40;
+    new->srtt_av=40;
+    new->srtt_av_d=0;
+    new->srtt_av_c=0;
+    new->rttvar = 5;
     new->rtt_hit = 0;
     new->seq_last = 0;
     new->seq_vect = (uint64_t) -1;
     new->loss = 0;
     new->flow_id = crypto_nonce_random();
-    new->bandwidth = bandwidth;
+    new->bandwidth_max = bandwidth_max;
+    new->bandwidth = bandwidth_max;
+    new->bandwidth_measured=0;
+    new->bm_data=0;
+    new->bm_timestamp=0;
     new->fallback_only = fallback_only;
     new->loss_tolerence = loss_tolerence;
     if (bindaddr)
@@ -846,6 +889,8 @@ mlvpn_rtun_recalc_weight_srtt()
     }
 }
 
+
+
 /* Based on tunnel bandwidth, with priority compute a "weight" value
  * to balance correctly the round robin rtun_choose.
  */
@@ -857,29 +902,32 @@ mlvpn_rtun_recalc_weight_prio()
 // proportion to srtt - this should give us the fastest pickup.
     return mlvpn_rtun_recalc_weight_srtt();
   }
-  
+
+    
   mlvpn_tunnel_t *t;
   double bwneeded=bandwidth * 1.5; /* do we need headroom e.g. * 1.5*/;
   double bwavailable=0;
   LIST_FOREACH(t, &rtuns, entries) {
     if (t->bandwidth == 0) // bail out, we need to know the bandwidths to share
       return mlvpn_rtun_recalc_weight_srtt();
+
+    if (bwavailable > 2 * bwneeded) {
+        mlvpn_rtun_set_weight(t, 0);
+        continue;
+    }
+    
     double part = ((((double)t->loss_tolerence-(double)t->sent_loss)*(100/(double)t->loss_tolerence))/100.0);
     if (part<0) part=0;
     // effectively, the link is lossy, and will be marked as such later, here,
     // simply remove the weight from the link.
 
-    //    as srtt rises above the average, pull down the weight
-    if (t->srtt > t->srtt_av*1.5) {
-      part *= (t->srtt_av*1.5)/t->srtt;
-    }
     // Should we limit to e.g. 0.8 of the bandwidth here?
     if ((t->quota == 0) && (t->status >= MLVPN_AUTHOK)) {
       mlvpn_rtun_set_weight(t, (t->bandwidth*part));
       bwavailable+=(t->bandwidth*part);
     } else {
       double bw=bwneeded - bwavailable;
-      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth*3)) && (t->status >= MLVPN_AUTHOK)) {
+      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth_max*3)) && (t->status >= MLVPN_AUTHOK)) {
         if (t->bandwidth*part > bw) {
           mlvpn_rtun_set_weight(t, (bw*part));
           bwavailable+=bw*part;
@@ -894,7 +942,12 @@ mlvpn_rtun_recalc_weight_prio()
   }
   
   LIST_FOREACH(t, &rtuns, entries) {
-    mlvpn_rtun_set_weight(t, (t->weight/bwavailable)*100);
+// dont bother with minor links. This will result in less than 100% sometimes....
+    if (((t->weight/bwavailable)*100) < 15) {
+      mlvpn_rtun_set_weight(t, 0);
+    } else {
+      mlvpn_rtun_set_weight(t, (t->weight/bwavailable)*100);
+    }    
   }
   if (bwavailable==0) {
     return mlvpn_rtun_recalc_weight_srtt();
@@ -1270,15 +1323,14 @@ mlvpn_rtun_tick_connect(mlvpn_tunnel_t *t)
 void mlvpn_calc_bandwidth(uint32_t len)
 {
   ev_tstamp now=ev_now(EV_A);
+
   if (lastsent==0) lastsent=now;
   ev_tstamp diff=now - lastsent;
   bandwidthdata+=len;
   if (diff>3.0) {
     lastsent=now;
     bandwidth=((((double)bandwidthdata*8) / diff))/1000; // kbits/sec
-//    printf("%10.1f %lu %5.2f\n",bandwidth, bandwidthdata, diff);
     bandwidthdata=0;
-
     // what we can do here is add any bandwidth allocation
     // The allocation should be per second.
     // permittedis in bytes.
@@ -1288,6 +1340,36 @@ void mlvpn_calc_bandwidth(uint32_t len)
       if (t->quota) {
         t->permitted+=(((double)t->quota * diff)*1000.0)/8.0; // listed in kbps
       }
+
+      // calc the srtt average...
+      t->srtt_av = (t->srtt_av_d / t->srtt_av_c);
+      // reset so if we get no traffic, we still see a valid srtt
+      t->srtt_av_d=t->srtt + (4*t->rttvar);;
+      t->srtt_av_c=1;
+
+      // calc measured bandwidth
+      t->bandwidth_measured=((((double)(t->bm_data)*8) / diff))/1000; // kbits/sec
+      t->bm_data=0;
+
+//      measure the pipeline length?????
+//        That could give you a bandwidth indication?
+//        you could use just the seq numbers?
+        
+      if (t->srtt_target) {
+        if (t->srtt_av < t->srtt_target*0.9 && t->bandwidth < t->bandwidth_max) {
+          t->bandwidth*=1.05;
+        } else {
+          if (t->srtt_av > t->srtt_target*1.1 && t->bandwidth > (t->bandwidth_max/4)) {
+            t->bandwidth*=0.95;
+          }
+        }
+      }
+
+      
+      if (t->srtt_target && t->srtt_av < t->srtt_target && t->bandwidth_measured>t->bandwidth) {
+        t->bandwidth=t->bandwidth_measured;
+      }
+      
     }
     mlvpn_rtun_recalc_weight();
   }
@@ -1296,8 +1378,8 @@ void mlvpn_calc_bandwidth(uint32_t len)
 mlvpn_tunnel_t *
 mlvpn_rtun_choose(uint32_t len)
 {
-  mlvpn_calc_bandwidth(len);
   mlvpn_tunnel_t *tun;
+  mlvpn_calc_bandwidth(len);
   tun = mlvpn_rtun_wrr_choose(len);
   return tun;
 }
@@ -1333,7 +1415,7 @@ mlvpn_rtun_send_disconnect(mlvpn_tunnel_t *t)
 static void
 mlvpn_rtun_check_lossy(mlvpn_tunnel_t *tun)
 {
-  int loss = tun->sent_loss;//mlvpn_loss_ratio(tun);
+  int loss = tun->sent_loss;
     int status_changed = 0;
     if (loss >= tun->loss_tolerence && tun->status == MLVPN_AUTHOK) {
         log_info("rtt", "%s packet loss reached threashold: %d%%/%d%%",

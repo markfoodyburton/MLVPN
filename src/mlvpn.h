@@ -158,8 +158,11 @@ typedef struct mlvpn_tunnel_s
     uint64_t seq_vect;
     uint64_t last_seen;
     int rtt_hit;
+    uint32_t srtt_target;
     double srtt;
     double srtt_av;
+    double srtt_av_d;
+    double srtt_av_c;
     double rttvar;
     double weight;        /* For weight round robin */
     uint32_t flow_id;
@@ -172,7 +175,12 @@ typedef struct mlvpn_tunnel_s
     uint32_t reorder_length_preset;  /* minimum  packets this tunnel can re-order */
     uint32_t reorder_length;  /* how many packets this tunnel can re-order */
     uint32_t timeout;     /* configured timeout in seconds */
-    uint32_t bandwidth;   /* bandwidth in bytes per second */
+    uint32_t bandwidth_max;   /* max bandwidth in bytes per second */
+    uint32_t bandwidth;   /* current bandwidth in bytes per second */
+    uint32_t bandwidth_measured;
+    uint32_t bm_data;
+    ev_tstamp bm_timestamp;
+//    uint32_t bandwidth_asked;
     circular_buffer_t *sbuf;    /* send buffer */
     circular_buffer_t *hpsbuf;  /* high priority buffer */
     struct addrinfo *addrinfo;
@@ -208,7 +216,8 @@ mlvpn_tunnel_t *mlvpn_rtun_new(const char *name,
     const char *destaddr, const char *destport,
     int server_mode, uint32_t timeout,
     int fallback_only, uint32_t bandwidth,
-    uint32_t loss_tolerence, uint32_t quota, uint32_t reorder_length);
+    uint32_t loss_tolerence, uint32_t quota,
+    uint32_t reorder_length, uint32_t srtt_target);
 void mlvpn_rtun_drop(mlvpn_tunnel_t *t);
 void mlvpn_rtun_status_down(mlvpn_tunnel_t *t);
 #ifdef HAVE_FILTERS

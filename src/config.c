@@ -263,6 +263,7 @@ mlvpn_config(int config_file_fd, int first_time)
                 uint32_t bwlimit = 0;
                 uint32_t quota = 0;
                 uint32_t reorder_length = 5;
+                uint32_t srtt_target = 100;
                 uint32_t timeout = 30;
                 uint32_t loss_tolerence;
                 int create_tunnel = 1;
@@ -313,6 +314,9 @@ mlvpn_config(int config_file_fd, int first_time)
                     NULL, 0);
                 _conf_set_uint_from_conf(
                     config, lastSection, "reorder_length", &reorder_length, 5,
+                    NULL, 0);
+                _conf_set_uint_from_conf(
+                    config, lastSection, "srtt_target", &srtt_target, 5,
                     NULL, 0);
                 _conf_set_uint_from_conf(
                     config, lastSection, "timeout", &timeout, default_timeout,
@@ -370,11 +374,11 @@ mlvpn_config(int config_file_fd, int first_time)
                                 tmptun->name, tmptun->fallback_only, fallback_only);
                             tmptun->fallback_only = fallback_only;
                         }
-                        if (tmptun->bandwidth != bwlimit)
+                        if (tmptun->bandwidth_max != bwlimit)
                         {
                           log_info("config", "%s bandwidth changed from %d to %d",
-                                tmptun->name, tmptun->bandwidth, bwlimit);
-                            tmptun->bandwidth = bwlimit;
+                                tmptun->name, tmptun->bandwidth_max, bwlimit);
+                            tmptun->bandwidth_max = bwlimit;
                         }
                         if (tmptun->quota != quota)
                         {
@@ -387,6 +391,12 @@ mlvpn_config(int config_file_fd, int first_time)
                           log_info("config", "%s reorder length changed from %d to %d",
                                 tmptun->name, tmptun->reorder_length_preset, reorder_length);
                             tmptun->reorder_length_preset = reorder_length;
+                        }
+                        if (tmptun->srtt_target != srtt_target)
+                        {
+                          log_info("config", "%s target srtt changed from %d to %d",
+                                tmptun->name, tmptun->srtt_target, srtt_target);
+                            tmptun->srtt_target = srtt_target;
                         }
                         if (tmptun->loss_tolerence != loss_tolerence)
                         {
@@ -405,7 +415,7 @@ mlvpn_config(int config_file_fd, int first_time)
                     mlvpn_rtun_new(
                         lastSection, bindaddr, bindport, bindfib, dstaddr, dstport,
                         default_server_mode, timeout, fallback_only,
-                        bwlimit, loss_tolerence, quota, reorder_length);
+                        bwlimit, loss_tolerence, quota, reorder_length, srtt_target);
                 }
                 if (bindaddr)
                     free(bindaddr);
