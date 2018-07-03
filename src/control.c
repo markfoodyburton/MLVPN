@@ -32,6 +32,7 @@ extern char *_progname;
 extern struct mlvpn_status_s mlvpn_status;
 extern double bandwidth;
 void mlvpn_control_write_status(struct mlvpn_control *ctrl);
+extern int mlvpn_reorder_length();
 
 
 #define HTTP_HEADERS "HTTP/1.1 200 OK\r\n" \
@@ -53,6 +54,7 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl);
     "   \"name\": \"%s\"\n" \
     "},\n" \
     "\"bandwidth_out\": %f,\n" \
+    "\"reorder_length\": %d,\n"   \
     "\"tunnels\": [\n"
 
 #define JSON_STATUS_RTUN "{\n" \
@@ -401,7 +403,8 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl)
         0,
         tuntap.type == MLVPN_TUNTAPMODE_TUN ? "tun" : "tap",
         tuntap.devname,
-        bandwidth
+        bandwidth,
+        mlvpn_reorder_length()
     );
     mlvpn_control_write(ctrl, buf, ret);
     LIST_FOREACH(t, &rtuns, entries)

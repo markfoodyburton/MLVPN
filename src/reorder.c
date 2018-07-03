@@ -69,6 +69,11 @@ extern struct ev_loop *loop;
 
 void mlvpn_reorder_drain();
 
+int mlvpn_reorder_length() 
+{
+  return reorder_buffer->list_size;
+}
+
 void mlvpn_reorder_drain_timeout(EV_P_ ev_timer *w, int revents)
 {
     log_debug("reorder", "reorder timeout. Packet loss?");
@@ -138,8 +143,8 @@ void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
 
   p->timestamp = ev_now(EV_DEFAULT_UC);
 
-  if ((!b->is_initialized) ||
-      (abs((int)(b->min_seqn - pkt->seq)) > b->list_size_av*100))
+  if ((!b->is_initialized))// ||
+//      (abs((int)(b->min_seqn - pkt->seq)) > b->list_size_av*100))
   {
     b->min_seqn = pkt->seq;
     b->is_initialized = 1;
@@ -216,6 +221,7 @@ void mlvpn_reorder_drain()
 //          (b->list_size>((b->list_size_av)*2)) ||
 //          (b->list_size > 256) ||
           (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
+          || b->list_size>200
            ))
     {
       

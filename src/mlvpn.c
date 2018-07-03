@@ -572,9 +572,9 @@ mlvpn_protocol_read(
         if ((R < 5000) && (tun->loss==0)) { /* ignore large values, e.g. server
                                              * was Ctrl-Zed, and while there
                                              * are losses, the values will be wrong! */
-            if (tun->rtt_hit<5) { /* first measurement */
-                tun->srtt = R;
-                tun->rttvar = R / 2;
+            if (tun->rtt_hit<10) { /* first measurement */
+              tun->srtt = 40;//R;
+                tun->rttvar = 0;//R / 2;
                 tun->rtt_hit ++;
             } else {
                 const double alpha = 1.0 / 8.0;

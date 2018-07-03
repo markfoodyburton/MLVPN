@@ -39,6 +39,7 @@ EOF
 CHART mlvpn.bandwidth_out '' "MLVPN Outbound Bandwidth" "kbits/s" '' '' line 1 ''
 DIMENSION bandwidth bandwidth absolute
 EOF
+    wget -q -O - 127.0.0.1:1040/status | perl -e 'use Data::Dumper; use JSON;local $/ = undef;$data = decode_json(<>); $ts=$data->{'tunnels'};foreach $i (@$ts) { print  "DIMENSION ".$i->{"name"}." ".$i->{"name"}." absolute\n"; }'
     
     cat <<EOF
 CHART mlvpn.outbound_p '' "MLVPN Outbound Traffic breakdown" "%" '' '' stacked 3 ''
@@ -61,9 +62,15 @@ EOF
     wget -q -O - 127.0.0.1:1040/status | perl -e 'use Data::Dumper; use JSON;local $/ = undef;$data = decode_json(<>); $ts=$data->{'tunnels'};foreach $i (@$ts) { print  "DIMENSION ".$i->{"name"}." ".$i->{"name"}." percentage-of-incremental-row\n"; }'
     
     cat <<EOF
-CHART mlvpn.loss '' "MLVPN loss" "packets/s" '' '' line 7 ''
+CHART mlvpn.loss '' "MLVPN loss" "%" '' '' line 7 ''
 EOF
     wget -q -O - 127.0.0.1:1040/status | perl -e 'use Data::Dumper; use JSON;local $/ = undef;$data = decode_json(<>); $ts=$data->{'tunnels'};foreach $i (@$ts) { print  "DIMENSION ".$i->{"name"}."in ".$i->{"name"}."in absolute 1 1\n"; print  "DIMENSION ".$i->{"name"}."out ".$i->{"name"}."out absolute 1 1\n"; }'
+
+    cat <<EOF
+CHART mlvpn.reorder_length '' "MLVPN reorder length" "packets" '' '' line 7 ''
+DIMENSION total total absolute
+EOF
+    wget -q -O - 127.0.0.1:1040/status | perl -e 'use Data::Dumper; use JSON;local $/ = undef;$data = decode_json(<>); $ts=$data->{'tunnels'};foreach $i (@$ts) { print  "DIMENSION ".$i->{"name"}." ".$i->{"name"}." absolute 1 1\n"; }'
 
     cat <<EOF
 CHART mlvpn.permitted '' "MLVPN permitted" "Mbytes" '' '' line 6 ''
@@ -94,6 +101,7 @@ mlvpn_update() {
     wget -q -O - 127.0.0.1:1040/status | perl -e 'use Data::Dumper; use JSON;$arg="'$1'";local $/ = undef;$data = decode_json(<>); $ts=$data->{'tunnels'};
 print "BEGIN mlvpn.bandwidth_out $arg\n";
 print "SET bandwidth = ".$data->{'bandwidth_out'}."\n";
+foreach $i (@$ts) { print  "SET ".$i->{"name"}." = ". $i->{"bandwidth"}."\n"; }
 print "END\n";
 print "BEGIN mlvpn.inbound $arg\n";
 foreach $i (@$ts) { print  "SET ".$i->{"name"}." = ". $i->{"recvbytes"}."\n"; }
@@ -113,6 +121,10 @@ print "END\n";
 print "BEGIN mlvpn.loss $arg\n";
 foreach $i (@$ts) { print  "SET ".$i->{"name"}."in = ". $i->{"lossin"}."\n"; }
 foreach $i (@$ts) { print  "SET ".$i->{"name"}."out = ". $i->{"lossout"}."\n"; }
+print "END\n";
+print "BEGIN mlvpn.reorder_length $arg\n";
+print "SET total = ".$data->{'reorder_length'}."\n";
+foreach $i (@$ts) { print  "SET ".$i->{"name"}." = ". $i->{"reorder_length"}."\n"; }
 print "END\n";
 print "BEGIN mlvpn.permitted $arg\n";
 foreach $i (@$ts) { print  "SET ".$i->{"name"}." = ". $i->{"permitted"}."\n"; }
