@@ -200,7 +200,7 @@ void mlvpn_reorder_drain()
           t->status >= MLVPN_AUTHOK &&
           (t->last_activity > ev_now(EV_DEFAULT_UC)-(((double)(t->srtt)/1000.0)*2))
           ) {
-        o=t->last_seen - t->reorder_length;
+        o=(t->last_seen - t->reorder_length)-1;
         if (!oldest || ((int64_t)(oldest-o))>=0) {
           oldest=o;
         }
