@@ -195,15 +195,15 @@ void mlvpn_reorder_drain()
   {
     mlvpn_tunnel_t *t;
     LIST_FOREACH(t, &rtuns, entries) {
-      uint64_t o=b->min_seqn;
+      uint64_t o;
       if (t->reorder_length &&
           t->status >= MLVPN_AUTHOK &&
           (t->last_activity > ev_now(EV_DEFAULT_UC)-(((double)(t->srtt)/1000.0)*2))
           ) {
         o=t->last_seen - t->reorder_length;
-      }
-      if (!oldest || ((int64_t)(oldest-o))>=0) {
-        oldest=o;
+        if (!oldest || ((int64_t)(oldest-o))>=0) {
+          oldest=o;
+        }
       }
     }
   }
