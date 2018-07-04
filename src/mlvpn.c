@@ -572,6 +572,7 @@ mlvpn_protocol_read(
         if ((R < 5000) && (tun->loss==0)) { /* ignore large values, e.g. server
                                              * was Ctrl-Zed, and while there
                                              * are losses, the values will be wrong! */
+            tun->srtt_raw=R;
             if (tun->rtt_hit<10) { /* first measurement */
               tun->srtt = 40;//R;
                 tun->rttvar = 0;//R / 2;
@@ -600,7 +601,6 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     ssize_t ret;
     size_t wlen;
     mlvpn_proto_t proto;
-    uint64_t now64 = mlvpn_timestamp64(ev_now(EV_DEFAULT_UC));
     memset(&proto, 0, sizeof(proto));
     mlvpn_pkt_t *pkt = mlvpn_pktbuffer_read(pktbuf);
 
@@ -620,6 +620,8 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     }
     
     wlen = PKTHDRSIZ(proto) + pkt->len;
+
+
     proto.len = pkt->len;
     proto.flags = pkt->type;
 //    if (pkt->reorder) {
@@ -630,25 +632,8 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     proto.version = MLVPN_PROTOCOL_VERSION;
     proto.reorder = pkt->reorder;
     proto.sent_loss=mlvpn_loss_ratio(tun);
-    /* we have a recent received timestamp */
-    if (tun->saved_timestamp != -1) {
-      if (now64 - tun->saved_timestamp_received_at < 1000 ) {
-        /* send "corrected" timestamp advanced by how long we held it */
-        /* Cast to uint16_t there intentional */
-        proto.timestamp_reply = tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at);
-        tun->saved_timestamp = -1;
-        tun->saved_timestamp_received_at = 0;
-      } else {
-        proto.timestamp_reply = -1;
-        log_debug("rtt","(%s) No timestamp added, time too long! (%lu > 1000)",tun->name, tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at ));
-      }
-    } else {
-      proto.timestamp_reply = -1;
-      log_debug("rtt","(%s) No timestamp added, time too long! (%lu > 1000)",tun->name, tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at ));
-    }
 
-    proto.timestamp = mlvpn_timestamp16(now64);
-#ifdef ENABLE_CRYPTO
+    #ifdef ENABLE_CRYPTO
     if (mlvpn_options.cleartext_data && pkt->type == MLVPN_PKT_DATA) {
         memcpy(&proto.data, &pkt->data, pkt->len);
     } else {
@@ -676,6 +661,28 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
 #else
     memcpy(&proto.data, &pkt->data, pkt->len);
 #endif
+
+    
+//    uint64_t now64 = mlvpn_timestamp64(ev_now(EV_DEFAULT_UC));
+    uint64_t now64 = mlvpn_timestamp64(ev_time());
+    /* we have a recent received timestamp */
+    if (tun->saved_timestamp != -1) {
+      if (now64 - tun->saved_timestamp_received_at < 1000 ) {
+        /* send "corrected" timestamp advanced by how long we held it */
+        /* Cast to uint16_t there intentional */
+        proto.timestamp_reply = tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at);
+        tun->saved_timestamp = -1;
+        tun->saved_timestamp_received_at = 0;
+      } else {
+        proto.timestamp_reply = -1;
+        log_debug("rtt","(%s) No timestamp added, time too long! (%lu > 1000)",tun->name, tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at ));
+      }
+    } else {
+      proto.timestamp_reply = -1;
+      log_debug("rtt","(%s) No timestamp added, time too long! (%lu > 1000)",tun->name, tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at ));
+    }
+
+    proto.timestamp = mlvpn_timestamp16(now64);
     proto.len = htobe16(proto.len);
     proto.tun_seq = htobe64(proto.tun_seq);
     proto.data_seq = htobe64(proto.data_seq);

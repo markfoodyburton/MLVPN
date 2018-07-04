@@ -163,6 +163,7 @@ typedef struct mlvpn_tunnel_s
     double srtt_av;
     double srtt_av_d;
     double srtt_av_c;
+    double srtt_raw;
     double rttvar;
     double weight;        /* For weight round robin */
     uint32_t flow_id;
