@@ -61,11 +61,22 @@ mlvpn_cb_is_full(const circular_buffer_t *buf)
     return (buf->end + 1) % buf->size == buf->start;
 }
 
+int mlvpn_cb_length(const circular_buffer_t *buf)
+{
+  int l;
+  if (buf->start > buf->end)
+    l=(buf->end+buf->size) - buf->start;
+  else
+    l=buf->end - buf->start;
+  return l;
+}
+
 int
 mlvpn_cb_is_empty(const circular_buffer_t *buf)
 {
     return buf->end == buf->start;
 }
+
 
 /* Release and return the packet if available.
  * data must point to a valid location in memory

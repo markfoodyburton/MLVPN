@@ -57,8 +57,11 @@ struct mlvpn_reorder_buffer {
   int is_initialized;
   int enabled;
   int list_size;
-  int list_size_av;
+//  int list_size_av;
+  int list_size_max;
   int max_size;
+  uint64_t loss;
+  uint64_t delivered;
 
   TAILQ_HEAD(list_t, pkttailq) list, pool;
 };
@@ -71,9 +74,23 @@ void mlvpn_reorder_drain();
 
 int mlvpn_reorder_length() 
 {
-  return reorder_buffer->list_size;
+  int r=reorder_buffer->list_size_max;
+  reorder_buffer->list_size_max=0;
+  return r;
 }
 
+double mlvpn_total_loss()
+{
+  float r=0;
+  
+  if (reorder_buffer->loss) {
+    r=((double)reorder_buffer->loss / (double)(reorder_buffer->loss + reorder_buffer->delivered))*100.0;
+  }
+  reorder_buffer->loss=0;
+  reorder_buffer->delivered=0;
+  return r;
+}
+  
 void mlvpn_reorder_drain_timeout(EV_P_ ev_timer *w, int revents)
 {
     log_debug("reorder", "reorder timeout. Packet loss?");
@@ -108,7 +125,8 @@ mlvpn_reorder_reset()
     TAILQ_INSERT_HEAD(&b->pool, p, entry);
   }
   b->list_size=0;
-  b->list_size_av=10;
+//  b->list_size_av=10;
+  b->list_size_max=0;
   b->is_initialized=0;
   b->enabled=0;
   mlvpn_reorder_adjust_timeout(0.8);
@@ -172,7 +190,9 @@ void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
   }
 
   b->list_size++;
-
+  if (b->list_size > b->list_size_max) {
+    b->list_size_max = b->list_size;
+  }
   if (TAILQ_LAST(&b->list,list_t) && ((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq) > 0)) {
     log_debug("reorder", "got old insert %d behind (probably fluctuating RTT)\n",(int)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq));
 //    printf("got old insert %d behind (probably fluctuating RTT)\n",(int)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq));
@@ -199,8 +219,15 @@ void mlvpn_reorder_drain()
       if (t->reorder_length &&
           t->status >= MLVPN_AUTHOK &&
           (t->last_activity > ev_now(EV_DEFAULT_UC)-(((double)(t->srtt)/1000.0)*2))
+
+//          this is (probably) wrong....
+//          if a tunnl was active a little while ago, but it's seq number is now 'old', it will hold up the pruning...
+//We should (probably?) only care if the value packet is still in the reorder buff?
+//
+//Also, better make all the tunnels 'active' to make sure that there is traffic on all tunnels, so we can prune better !!!!
+
           ) {
-        o=(t->last_seen - t->reorder_length)-1;
+        o=(t->last_seen - t->reorder_length);
         if (!oldest || ((int64_t)(oldest-o))>=0) {
           oldest=o;
         }
@@ -217,14 +244,14 @@ void mlvpn_reorder_drain()
   
   while
     (!TAILQ_EMPTY(&b->list) &&
-         (((int64_t)(oldest - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0) ||
+         (((int64_t)(oldest - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)
 //          (b->list_size>((b->list_size_av)*2)) ||
 //          (b->list_size > 256) ||
-          (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
-          || b->list_size>200
+          || (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
+//          || b->list_size>64
            ))
     {
-      
+
     struct pkttailq *l = TAILQ_LAST(&b->list,list_t);
 
 /*    if ((int64_t)(b->min_seqn - l->pkt.seq)<0) {
@@ -249,6 +276,12 @@ void mlvpn_reorder_drain()
     b->list_size--;
     drain_cnt++;
 
+    if (b->min_seqn == l->pkt.seq) {
+      b->delivered++;
+    } else {
+      b->loss++;
+    }
+    
     if ((int64_t)(b->min_seqn - l->pkt.seq)<=0) {
       b->min_seqn=l->pkt.seq+1;
     }

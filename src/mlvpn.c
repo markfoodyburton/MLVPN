@@ -282,7 +282,7 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
     tun->seq_vect |= 1;
     tun->loss--;
 
-#if 1
+#if 0
     {
       int l=0;
       for (int i=0;i < 64; i++) {
@@ -298,7 +298,7 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
     tun->seq_last = seq;
 
     if (tun->loss) {
-      int n=0;
+/*      int n=0;
       for (int i=0;i < tun->reorder_length+2; i++) {
         if ( (1 & (tun->seq_vect >> i)) == 0 ) {
           n++;
@@ -309,7 +309,7 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
         // recorded, time to clear it off
         tun->seq_vect = (uint64_t) -1;
         tun->loss = 0;
-      }
+        }*/
     } else {
       if (tun->reorder_length > tun->reorder_length_preset) {
         tun->reorder_length--;
@@ -321,7 +321,7 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
         tun->loss--;
       }
   
-#if 1
+#if 0
       {
           int l=0;
           for (int i=0;i < 64; i++) {
@@ -338,6 +338,9 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
         int d=(tun->seq_last - seq)+1;
         if (tun->reorder_length <= d) {
           tun->reorder_length = d;
+          if (d > tun->reorder_length_max) {
+            tun->reorder_length_max=d;
+          }
         }
   } else {
     /* consider a wrap round. */
@@ -583,7 +586,7 @@ mlvpn_protocol_read(
                 tun->rttvar = (1 - beta) * tun->rttvar + (beta * fabs(tun->srtt - R));
                 tun->srtt = (1 - alpha) * tun->srtt + (alpha * R);
             }
-            tun->srtt_av_d+=tun->srtt + (4*tun->rttvar);
+            tun->srtt_av_d+=tun->srtt_raw + (4*tun->rttvar);
             tun->srtt_av_c++;
         }
 //        log_debug("rtt", "%ums srtt %ums loss ratio: %d",
@@ -730,6 +733,7 @@ static void
 mlvpn_rtun_write(EV_P_ ev_io *w, int revents)
 {
     mlvpn_tunnel_t *tun = w->data;
+
     if (! mlvpn_cb_is_empty(tun->hpsbuf)) {
         mlvpn_rtun_send(tun, tun->hpsbuf);
     }
@@ -737,6 +741,7 @@ mlvpn_rtun_write(EV_P_ ev_io *w, int revents)
     if (! mlvpn_cb_is_empty(tun->sbuf)) {
         mlvpn_rtun_send(tun, tun->sbuf);
     }
+
 }
 
 mlvpn_tunnel_t *
@@ -785,6 +790,7 @@ mlvpn_rtun_new(const char *name,
     new->quota = quota;
     new->reorder_length= reorder_length;
     new->reorder_length_preset= reorder_length;
+    new->reorder_length_max=0;
     new->seq = 0;
     new->last_seen = 0;
 //    new->expected_receiver_seq = 0;
@@ -950,7 +956,7 @@ mlvpn_rtun_recalc_weight_prio()
   
   LIST_FOREACH(t, &rtuns, entries) {
 // dont bother with minor links. This will result in less than 100% sometimes....
-    if (((t->weight/bwavailable)*100) < 15) {
+    if (((t->weight/bwavailable)*100) < 10) {
       mlvpn_rtun_set_weight(t, 0);
     } else {
       mlvpn_rtun_set_weight(t, (t->weight/bwavailable)*100);

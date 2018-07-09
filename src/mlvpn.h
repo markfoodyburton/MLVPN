@@ -175,6 +175,7 @@ typedef struct mlvpn_tunnel_s
     uint32_t quota; /* how many bytes per second we can send */
     uint32_t reorder_length_preset;  /* minimum  packets this tunnel can re-order */
     uint32_t reorder_length;  /* how many packets this tunnel can re-order */
+    uint32_t reorder_length_max;
     uint32_t timeout;     /* configured timeout in seconds */
     uint32_t bandwidth_max;   /* max bandwidth in bytes per second */
     uint32_t bandwidth;   /* current bandwidth in bytes per second */
