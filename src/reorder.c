@@ -32,6 +32,13 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+/*
+  IDEAS:
+
+   1/ have a fixed length reorder buffer, controlled by a timer to deliver to the tun/tap.
+   2/ have a separate thread read from the tun/tap
+*/
+
 #include <inttypes.h>
 #include <string.h>
 #include <sys/queue.h>
@@ -57,7 +64,6 @@ struct mlvpn_reorder_buffer {
   int is_initialized;
   int enabled;
   int list_size;
-//  int list_size_av;
   int list_size_max;
   int max_size;
   uint64_t loss;
@@ -125,7 +131,6 @@ mlvpn_reorder_reset()
     TAILQ_INSERT_HEAD(&b->pool, p, entry);
   }
   b->list_size=0;
-//  b->list_size_av=10;
   b->list_size_max=0;
   b->is_initialized=0;
   b->enabled=0;
@@ -163,7 +168,6 @@ void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
 
   if ((!b->is_initialized) ||
       ((int64_t)(b->min_seqn - pkt->seq) > 1000 && pkt->seq < 1000))
-//      (abs((int)(b->min_seqn - pkt->seq)) > b->list_size_av*100))
   {
     b->min_seqn = pkt->seq;
     b->is_initialized = 1;
@@ -218,14 +222,9 @@ void mlvpn_reorder_drain()
     LIST_FOREACH(t, &rtuns, entries) {
       if (t->reorder_length
           && t->status >= MLVPN_AUTHOK
-          &&  (t->last_activity > ev_now(EV_DEFAULT_UC)-3.0)//(((double)(t->srtt)/1000.0)*20))
-
-//          this is (probably) wrong....
-//          if a tunnl was active a little while ago, but it's seq number is now 'old', it will hold up the pruning...
-//We should (probably?) only care if the value packet is still in the reorder buff?
-//
-//Also, better make all the tunnels 'active' to make sure that there is traffic on all tunnels, so we can prune better !!!!
-
+          &&  (t->last_activity > ev_now(EV_DEFAULT_UC)-3.0)
+// if there has been acivity in the last 3 seconds, we'll assume this tunnel isn't dead.
+// better keep all the tunnels 'active' to make sure that there is traffic on all tunnels, so we can prune better !!!!
           ) {
         uint64_t o=(t->last_seen - t->reorder_length);
         if (!oldest || ((int64_t)(oldest-o))>=0) {
@@ -239,17 +238,11 @@ void mlvpn_reorder_drain()
     oldest=b->min_seqn;
   }
 
-  
-////((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0) ||
 
-//  if (TAILQ_LAST(&b->list,list_t)->timestamp < cut) {
-//    printf("HERE!!! %f %f \n",TAILQ_LAST(&b->list,list_t)->timestamp, cut);
-//  }
+  
   while
     (!TAILQ_EMPTY(&b->list) &&
          (((int64_t)(oldest - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)
-//          (b->list_size>((b->list_size_av)*2)) ||
-//          (b->list_size > 256) ||
           || (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
 //          || b->list_size>128
            ))
@@ -257,20 +250,6 @@ void mlvpn_reorder_drain()
 
     struct pkttailq *l = TAILQ_LAST(&b->list,list_t);
 
-/*    if ((int64_t)(b->min_seqn - l->pkt.seq)<0) {
-      printf("Prune seq %lu min %lu oldest %lu list %d av %d time(from cut) %fs old",l->pkt.seq, b->min_seqn, oldest, b->list_size, b->list_size_av, cut - l->timestamp);
-      mlvpn_tunnel_t *t;
-      LIST_FOREACH(t, &rtuns, entries) {
-        if ((t->status == MLVPN_AUTHOK) &&
-            (t->last_activity > ev_now(EV_DEFAULT_UC)-(((double)(t->srtt)/1000.0)*2)))
-        {
-          printf(" loss on %s=%d ",t->name, mlvpn_loss_ratio(t));
-        }
-        }
-      printf("\n")
-
-    }
-*/
     mlvpn_rtun_inject_tuntap(&l->pkt);
     
     TAILQ_REMOVE(&b->list, l, entry);
@@ -288,28 +267,7 @@ void mlvpn_reorder_drain()
     if ((int64_t)(b->min_seqn - l->pkt.seq)<=0) {
       b->min_seqn=l->pkt.seq+1;
     }
-//    if (drain_cnt > 1) {
-//      break;
-//    }    
   }
-  
-/*  if (drain_cnt > 1) {
-    int last=b->list_size_av;
-    b->list_size_av = ((b->list_size_av*9) + (b->list_size + drain_cnt) + 5)/10;
-    if (b->list_size_av > 64) {
-      b->list_size_av = 64;
-      if (b->list_size_av != last ) {
-        log_info("reorder", "List size reached limit (64)\n");
-      }
-    } 
-    if (b->list_size_av < 4) {
-      b->list_size_av = 4;
-      if (b->list_size_av != last ) {
-        log_debug("reorder", "List size reached limit (4)\n");
-      }
-    } 
-  }
-*/
   
   if (TAILQ_EMPTY(&b->list)) {
     ev_timer_stop(EV_A_ &reorder_drain_timeout);
