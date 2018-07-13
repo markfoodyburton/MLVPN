@@ -139,14 +139,14 @@ void mlvpn_reorder_enable()
 
 void mlvpn_reorder_adjust_timeout(double t)
 {
-  reorder_drain_timeout.repeat = t;// ((reorder_drain_timeout.repeat*9)+ t)/10;
+  reorder_drain_timeout.repeat = t*2.2;// ((reorder_drain_timeout.repeat*9)+ t)/10;
 //  printf("rtt %f\n", reorder_drain_timeout.repeat);
 }
 
 void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
 {
   struct mlvpn_reorder_buffer *b=reorder_buffer;
-  if (!b->enabled || !pkt->reorder) {
+  if (!b->enabled || !pkt->reorder || !pkt->seq) {
     return mlvpn_rtun_inject_tuntap(pkt);
   }
 
@@ -161,7 +161,8 @@ void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
 
   p->timestamp = ev_now(EV_DEFAULT_UC);
 
-  if ((!b->is_initialized))// ||
+  if ((!b->is_initialized) ||
+      ((int64_t)(b->min_seqn - pkt->seq) > 1000 && pkt->seq < 1000))
 //      (abs((int)(b->min_seqn - pkt->seq)) > b->list_size_av*100))
   {
     b->min_seqn = pkt->seq;
@@ -205,7 +206,7 @@ void mlvpn_reorder_drain()
 {
   struct mlvpn_reorder_buffer *b=reorder_buffer;
   unsigned int drain_cnt = 0;
-  ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat/2);
+  ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat);
 
 
   // If there is no chance of getting a packet (it's older than the latest
@@ -215,10 +216,9 @@ void mlvpn_reorder_drain()
   {
     mlvpn_tunnel_t *t;
     LIST_FOREACH(t, &rtuns, entries) {
-      uint64_t o;
-      if (t->reorder_length &&
-          t->status >= MLVPN_AUTHOK &&
-          (t->last_activity > ev_now(EV_DEFAULT_UC)-(((double)(t->srtt)/1000.0)*2))
+      if (t->reorder_length
+          && t->status >= MLVPN_AUTHOK
+          &&  (t->last_activity > ev_now(EV_DEFAULT_UC)-3.0)//(((double)(t->srtt)/1000.0)*20))
 
 //          this is (probably) wrong....
 //          if a tunnl was active a little while ago, but it's seq number is now 'old', it will hold up the pruning...
@@ -227,28 +227,31 @@ void mlvpn_reorder_drain()
 //Also, better make all the tunnels 'active' to make sure that there is traffic on all tunnels, so we can prune better !!!!
 
           ) {
-        o=(t->last_seen - t->reorder_length);
+        uint64_t o=(t->last_seen - t->reorder_length);
         if (!oldest || ((int64_t)(oldest-o))>=0) {
           oldest=o;
         }
       }
     }
   }
-  if ((int64_t)(b->min_seqn - oldest)>=0) 
+  if (oldest==0 || (int64_t)(b->min_seqn - oldest)>=0) 
   {
     oldest=b->min_seqn;
   }
 
   
 ////((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0) ||
-  
+
+//  if (TAILQ_LAST(&b->list,list_t)->timestamp < cut) {
+//    printf("HERE!!! %f %f \n",TAILQ_LAST(&b->list,list_t)->timestamp, cut);
+//  }
   while
     (!TAILQ_EMPTY(&b->list) &&
          (((int64_t)(oldest - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)
 //          (b->list_size>((b->list_size_av)*2)) ||
 //          (b->list_size > 256) ||
           || (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
-//          || b->list_size>64
+//          || b->list_size>128
            ))
     {
 
@@ -285,7 +288,9 @@ void mlvpn_reorder_drain()
     if ((int64_t)(b->min_seqn - l->pkt.seq)<=0) {
       b->min_seqn=l->pkt.seq+1;
     }
-    
+//    if (drain_cnt > 1) {
+//      break;
+//    }    
   }
   
 /*  if (drain_cnt > 1) {

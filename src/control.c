@@ -449,7 +449,7 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl)
                        t->weight,
                        (LIST_NEXT(t, entries) ? "," : "")
                       );
-        t->reorder_length_max=0;
+        t->reorder_length_max=t->reorder_length;
         mlvpn_control_write(ctrl, buf, ret);
     }
     mlvpn_control_write(ctrl, "]}\n", 3);

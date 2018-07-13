@@ -282,66 +282,25 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
     tun->seq_vect |= 1;
     tun->loss--;
 
-#if 0
-    {
-      int l=0;
-      for (int i=0;i < 64; i++) {
-        if ( (1 & (tun->seq_vect >> i)) == 0 ) {
-          l++;
-        }
-      }
-      if (l!=tun->loss) {
-        printf("Loss jump %s: %lx full %d incremental %d length %d seq %lu last %lu diff %lu\n", tun->name, tun->seq_vect, l, tun->loss, tun->reorder_length, seq, tun->seq_last, seq-tun->seq_last);
-      }
-    }
-#endif
     tun->seq_last = seq;
 
-    if (tun->loss) {
-/*      int n=0;
-      for (int i=0;i < tun->reorder_length+2; i++) {
-        if ( (1 & (tun->seq_vect >> i)) == 0 ) {
-          n++;
-        }
-      }
-      if (n==0) {
-        // We're looking good, the fact that we had a loss would have been
-        // recorded, time to clear it off
-        tun->seq_vect = (uint64_t) -1;
-        tun->loss = 0;
-        }*/
-    } else {
+    if (!tun->loss) {
       if (tun->reorder_length > tun->reorder_length_preset) {
         tun->reorder_length--;
       }
     }
-    } else if (seq >= tun->seq_last - 63) {
-      if ((tun->seq_vect & (1 << (tun->seq_last - seq)))==0) {
-        tun->seq_vect |= (1 << (tun->seq_last - seq));
-        tun->loss--;
+  } else if (seq >= tun->seq_last - 63) {
+    if ((tun->seq_vect & (1 << (tun->seq_last - seq)))==0) {
+      tun->seq_vect |= (1 << (tun->seq_last - seq));
+      tun->loss--;
+    }
+    int d=(tun->seq_last - seq)+1;
+    if (tun->reorder_length <= d) {
+      tun->reorder_length = d;
+      if (d > tun->reorder_length_max) {
+        tun->reorder_length_max=d;
       }
-  
-#if 0
-      {
-          int l=0;
-          for (int i=0;i < 64; i++) {
-            if ( (1 & (tun->seq_vect >> i)) == 0 ) {
-              l++;
-            }
-          }
-          if (l!=tun->loss) {
-            printf("Loss fill %s: %lx full %d incremental %d length %d seq %lu last %lu diff %lu\n",tun->name, tun->seq_vect, l, tun->loss, tun->reorder_length, seq, tun->seq_last, tun->seq_last-seq);
-          }
-        }
-#endif
-//        printf("fill %s : %ld\n",tun->name, (tun->seq_last - seq));
-        int d=(tun->seq_last - seq)+1;
-        if (tun->reorder_length <= d) {
-          tun->reorder_length = d;
-          if (d > tun->reorder_length_max) {
-            tun->reorder_length_max=d;
-          }
-        }
+    }
   } else {
     /* consider a wrap round. */
     tun->seq_vect = (uint64_t) -1;
@@ -367,25 +326,6 @@ mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
   }
   if (loss < 0) loss=0;
 
-#if 1
-  int floss = 0;
-  /* Count zeroes */
-  for (int i = tun->reorder_length; i < 64; i++) {
-    if ( (1 & (tun->seq_vect >> i)) == 0 ) {
-      floss++;
-    }
-  }
-  if (loss != floss) {
-    printf("Loss: %lx full %d incremental %d length %d\n", tun->seq_vect, floss, loss, tun->reorder_length);
-    tun->loss=0;
-    for (int i=0;i < 64; i++) {
-      if ( (1 & (tun->seq_vect >> i)) == 0 ) {
-        tun->loss++;
-      }
-    }
-  }
-#endif
-  
   return (loss * 100) / 64;
 }
 
@@ -558,7 +498,7 @@ mlvpn_protocol_read(
         } else {
           tun->sent_loss=0;
         }
-        if (decap_pkt->reorder && decap_pkt->seq > tun->last_seen) {
+        if (decap_pkt->reorder && decap_pkt->seq) {// > tun->last_seen) {
           tun->last_seen=decap_pkt->seq;
         }
     } else {
@@ -666,7 +606,8 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
 #endif
 
     
-//    uint64_t now64 = mlvpn_timestamp64(ev_now(EV_DEFAULT_UC));
+// significant time can have elapsed, so maybe better use the current time
+    // rather than... uint64_t now64 = mlvpn_timestamp64(ev_now(EV_DEFAULT_UC));
     uint64_t now64 = mlvpn_timestamp64(ev_time());
     /* we have a recent received timestamp */
     if (tun->saved_timestamp != -1) {
@@ -793,7 +734,6 @@ mlvpn_rtun_new(const char *name,
     new->reorder_length_max=0;
     new->seq = 0;
     new->last_seen = 0;
-//    new->expected_receiver_seq = 0;
     new->saved_timestamp = -1;
     new->saved_timestamp_received_at = 0;
     new->srtt_target=srtt_target;
@@ -956,11 +896,11 @@ mlvpn_rtun_recalc_weight_prio()
   
   LIST_FOREACH(t, &rtuns, entries) {
 // dont bother with minor links. This will result in less than 100% sometimes....
-    if (((t->weight/bwavailable)*100) < 10) {
-      mlvpn_rtun_set_weight(t, 0);
-    } else {
+//    if (((t->weight/bwavailable)*100) < 10) {
+//      mlvpn_rtun_set_weight(t, 0);
+//    } else {
       mlvpn_rtun_set_weight(t, (t->weight/bwavailable)*100);
-    }    
+//    }    
   }
   if (bwavailable==0) {
     return mlvpn_rtun_recalc_weight_srtt();
@@ -1380,7 +1320,7 @@ void mlvpn_calc_bandwidth(uint32_t len)
 
       
       if (t->srtt_target && t->srtt_av < t->srtt_target && t->bandwidth_measured>t->bandwidth) {
-        t->bandwidth=t->bandwidth_measured;
+        t->bandwidth_max=t->bandwidth_measured;
       }
       
     }
@@ -1497,8 +1437,8 @@ mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents)
            /* We don't want to monitor fallback only links inside the
             * reorder timeout algorithm
             */
-            if (!t->fallback_only && t->rtt_hit) {
-              tmp = t->srtt + (4 * t->rttvar);
+            if (!t->fallback_only) {
+              tmp = t->srtt;
               max_srtt = max_srtt > tmp ? max_srtt : tmp;
             }
         }
@@ -1508,10 +1448,11 @@ mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents)
     if (max_srtt > 0) {
         /* Apply a factor to the srtt in order to get a window */
 //        max_srtt *= 2.2;
-        log_debug("reorder", "adjusting reordering drain timeout to %.0fms",
-            max_srtt);
+        log_debug("reorder", "adjusting reordering drain timeout to %.0fms",  max_srtt);
+//        printf("normal timout set %f\n",max_srtt);
         mlvpn_reorder_adjust_timeout(max_srtt / 1000.0);
     } else {
+//        printf("assumed timout set 800\n");
         mlvpn_reorder_adjust_timeout(0.8); /* Conservative 800ms shot */
     }
 }

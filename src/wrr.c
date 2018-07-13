@@ -23,22 +23,14 @@ static int wrr_min_index()
 
     for(i = 0; i < wrr.len; i++)
     {
-
-//      something wrong with srtt still?
-//        Somethign wrong with loss
-        
       if (wrr.tunnel[i]->quota==0 || wrr.tunnel[i]->permitted>0) {
-        if (wrr.tunnel[i]->srtt_raw < (wrr.tunnel[i]->srtt_target*2)) {
+        if (wrr.tunnel[i]->srtt_raw < (wrr.tunnel[i]->srtt_target*1.5)) {
           if (wrr.tunval[i] < min) {
-              
-//            && (wrr.tunnel[i]->quota==0 || wrr.tunnel[i]->permitted>0)
-//          && ((wrr.tunnel[i]->srtt_raw < wrr.tunnel[i]->srtt_target
-//        )
             min = wrr.tunval[i];
             min_index = i;
           }
         } else {
-          if ((wrr.tunnel[min_index]->srtt_raw > (wrr.tunnel[min_index]->srtt_target*2)) &&
+          if ((wrr.tunnel[min_index]->srtt_raw > (wrr.tunnel[min_index]->srtt_target*1.5)) &&
               (wrr.tunnel[i]->srtt_raw < wrr.tunnel[min_index]->srtt_raw)) {
             min = wrr.tunval[i];
             min_index = i;
