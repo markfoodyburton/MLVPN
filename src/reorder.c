@@ -36,7 +36,7 @@
   IDEAS:
 
    1/ have a fixed length reorder buffer, controlled by a timer to deliver to the tun/tap.
-   2/ have a separate thread read from the tun/tap
+
 */
 
 #include <inttypes.h>

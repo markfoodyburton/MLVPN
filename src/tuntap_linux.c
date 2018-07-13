@@ -16,7 +16,9 @@ mlvpn_tuntap_read(struct tuntap_s *tuntap)
 {
     ssize_t ret;
     u_char data[DEFAULT_MTU];
-
+// Trying a loop here wouldseem reasonable, to "read as much as possible", and
+// then we'de have better bandwidth measure. However, it seems to make things
+// worse. Presumably the extra 'buffering' does not play well....
     ret = read(tuntap->fd, &data, DEFAULT_MTU);
       
     if (ret<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) {
