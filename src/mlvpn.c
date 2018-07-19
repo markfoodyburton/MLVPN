@@ -90,6 +90,8 @@ ev_tstamp lastsent=0;
 uint64_t bandwidthdata=0;
 double bandwidth=0;
 
+static double avtime=3.0;
+
 struct mlvpn_status_s mlvpn_status = {
     .start_time = 0,
     .last_reload = 0,
@@ -858,14 +860,19 @@ mlvpn_rtun_recalc_weight_prio()
 
     
   mlvpn_tunnel_t *t;
-  double bwneeded=bandwidth * 1.5; /* do we need headroom e.g. * 1.5*/;
+  double bwneeded=bandwidth * 2; /* do we need headroom e.g. * 1.5*/;
   double bwavailable=0;
   LIST_FOREACH(t, &rtuns, entries) {
     if (t->bandwidth == 0) // bail out, we need to know the bandwidths to share
       return mlvpn_rtun_recalc_weight_srtt();
 
     if (bwavailable > 2 * bwneeded) {
-        mlvpn_rtun_set_weight(t, 0);
+//      bandwidth_max = (realBW * 8)/1000, and we want it for avtime seconds
+        if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*avtime)) && (t->status >= MLVPN_AUTHOK)) {
+          mlvpn_rtun_set_weight(t, bwneeded/50);
+        } else {
+          mlvpn_rtun_set_weight(t, 0);
+        }
         continue;
     }
     
@@ -880,7 +887,7 @@ mlvpn_rtun_recalc_weight_prio()
       bwavailable+=(t->bandwidth*part);
     } else {
       double bw=bwneeded - bwavailable;
-      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth_max*3)) && (t->status >= MLVPN_AUTHOK)) {
+      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth_max*125*avtime)) && (t->status >= MLVPN_AUTHOK)) {
         if (t->bandwidth*part > bw) {
           mlvpn_rtun_set_weight(t, (bw*part));
           bwavailable+=bw*part;
@@ -889,19 +896,15 @@ mlvpn_rtun_recalc_weight_prio()
           bwavailable+=(t->bandwidth*part);
         }
       } else {
-        mlvpn_rtun_set_weight(t, 0);
+        if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*avtime)) && (t->status >= MLVPN_AUTHOK)) {
+          mlvpn_rtun_set_weight(t, bwneeded/50);
+        } else {
+          mlvpn_rtun_set_weight(t, 0);
+        }
       }
     }
   }
   
-  LIST_FOREACH(t, &rtuns, entries) {
-// dont bother with minor links. This will result in less than 100% sometimes....
-//    if (((t->weight/bwavailable)*100) < 10) {
-//      mlvpn_rtun_set_weight(t, 0);
-//    } else {
-      mlvpn_rtun_set_weight(t, (t->weight/bwavailable)*100);
-//    }    
-  }
   if (bwavailable==0) {
     return mlvpn_rtun_recalc_weight_srtt();
   }
@@ -1280,7 +1283,7 @@ void mlvpn_calc_bandwidth(uint32_t len)
   if (lastsent==0) lastsent=now;
   ev_tstamp diff=now - lastsent;
   bandwidthdata+=len;
-  if (diff>3.0) {
+  if (diff>avtime) {
     lastsent=now;
     bandwidth=((((double)bandwidthdata*8) / diff))/1000; // kbits/sec
     bandwidthdata=0;
@@ -1319,8 +1322,8 @@ void mlvpn_calc_bandwidth(uint32_t len)
       }
 
       
-      if (t->srtt_target && t->srtt_av < t->srtt_target && t->bandwidth_measured>t->bandwidth) {
-        t->bandwidth_max=t->bandwidth_measured;
+      if (t->srtt_target && t->srtt_av < t->srtt_target && (t->bandwidth_measured * 0.9)>t->bandwidth_max) {
+        t->bandwidth_max=t->bandwidth_measured * 0.9;
       }
       
     }

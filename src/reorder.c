@@ -65,7 +65,6 @@ struct mlvpn_reorder_buffer {
   int enabled;
   int list_size;
   int list_size_max;
-  int max_size;
   uint64_t loss;
   uint64_t delivered;
 
@@ -113,7 +112,6 @@ void mlvpn_reorder_drain_timeout(EV_P_ ev_timer *w, int revents)
 void mlvpn_reorder_init()
 {
   reorder_buffer=malloc(sizeof(struct mlvpn_reorder_buffer));
-  reorder_buffer->max_size=10;
   TAILQ_INIT(&reorder_buffer->pool);
   TAILQ_INIT(&reorder_buffer->list);
   ev_init(&reorder_drain_timeout, &mlvpn_reorder_drain_timeout);
