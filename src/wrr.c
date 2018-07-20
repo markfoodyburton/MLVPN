@@ -64,7 +64,7 @@ void mlvpn_rtun_set_weight(mlvpn_tunnel_t *t, double weight)
     t->weight=(t->weight * 3.0 + weight)/4.0;
     for (int i = 0; i< wrr.len; i++) {
       wrr.tunval[i] = 0.0;
-    }
+      }
   }
 }
 
@@ -73,26 +73,31 @@ mlvpn_rtun_wrr_choose()
 {
 
   int idx = wrr_min_index();
-  
-  double total=0;
+  double srtt_av=0;
   for (int i = 0; i< wrr.len; i++) {
-    total+= wrr.tunnel[i]->weight;
+    srtt_av+=wrr.tunnel[i]->srtt_av;
   }
+  srtt_av/=wrr.len;
   
-  if (wrr.tunval[idx]<=0 || wrr.tunval[idx] > 10000) {
+  if (wrr.tunval[idx]<=0 || wrr.tunval[idx] > 1000000) {
     for (int i = 0; i< wrr.len; i++) {
       if (wrr.tunnel[i]->weight) {
-        wrr.tunval[i]=total / wrr.tunnel[i]->weight;
+        wrr.tunval[i]=1 / wrr.tunnel[i]->weight;
       } else {
         wrr.tunval[i]=wrr.len; // handle initial setup fairly
-      }      
+      }
     }
   } else {
-
+// simply basing things on the SRTT doesn't work, as the srtt is often
+// similar, even though te tunnel can haldle more!
+//    wrr.tunval[idx]+=wrr.tunnel[idx]->srtt_raw;
+    
     if (wrr.tunnel[idx]->srtt_raw > (wrr.tunnel[idx]->srtt_target*1.5)) {
-      wrr.tunval[idx]+=total; // lock it out for a bit
+      wrr.tunval[idx]+=1; // lock it out for a bit
     } else {
-      wrr.tunval[idx]+=total / wrr.tunnel[idx]->weight;
+      // Try to 'pull' towards the average srtt
+      double d=(wrr.tunnel[idx]->srtt_av / srtt_av);
+      wrr.tunval[idx]+=d / wrr.tunnel[idx]->weight;
     }
   }
   

@@ -150,6 +150,9 @@ typedef struct mlvpn_tunnel_s
                               * discarded */
     uint16_t loss;        /* our loss */
     uint16_t sent_loss;   /* loss as reported by far end */
+    uint64_t loss_cnt;
+    uint64_t loss_event;
+    double loss_av;
     uint64_t seq;
 //    uint64_t expected_receiver_seq;
     uint64_t saved_timestamp;

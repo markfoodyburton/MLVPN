@@ -90,7 +90,7 @@ ev_tstamp lastsent=0;
 uint64_t bandwidthdata=0;
 double bandwidth=0;
 
-static double avtime=3.0;
+static double avtime=2.0;
 
 struct mlvpn_status_s mlvpn_status = {
     .start_time = 0,
@@ -266,7 +266,8 @@ void mlvpn_rtun_inject_tuntap(mlvpn_pkt_t *pkt)
 static void
 mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
 {
-  if (seq > tun->seq_last + 64) {
+  tun->loss_cnt++;
+  if (seq >= tun->seq_last + 64) {
     /* consider a connection reset. */
     tun->seq_vect = (uint64_t) -1;
     tun->seq_last = seq;
@@ -277,6 +278,9 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
       if ((tun->seq_vect & (1ul<<63))==0) {
         tun->loss--; // We're nolonger counting that loss it happend some time
                      // ago (or the re-order is HUGE!
+      }
+      if ((tun->seq_vect & (1ul<<(tun->reorder_length_preset+1)))==0) {
+        tun->loss_event++;
       }
       tun->seq_vect<<=1;
       tun->loss++;
@@ -318,7 +322,9 @@ mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
 {
   if (tun->status < MLVPN_AUTHOK) {
     return 0; // for links that are down, report a 0 loss.
-  } 
+  }
+  return tun->loss_av;
+#if 0  
   int loss = tun->loss;
   /* remove things in the reorder_length 'shadow' */
   for (int i=0;i < tun->reorder_length; i++) {
@@ -329,6 +335,7 @@ mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
   if (loss < 0) loss=0;
 
   return (loss * 100) / 64;
+#endif
 }
 
 static void
@@ -748,6 +755,9 @@ mlvpn_rtun_new(const char *name,
     new->seq_last = 0;
     new->seq_vect = (uint64_t) -1;
     new->loss = 0;
+    new->loss_cnt=0;
+    new->loss_event=0;
+    new->loss_av=0;
     new->flow_id = crypto_nonce_random();
     new->bandwidth_max = bandwidth_max;
     new->bandwidth = bandwidth_max;
@@ -1322,10 +1332,19 @@ void mlvpn_calc_bandwidth(uint32_t len)
       }
 
       
-      if (t->srtt_target && t->srtt_av < t->srtt_target && (t->bandwidth_measured * 0.9)>t->bandwidth_max) {
-        t->bandwidth_max=t->bandwidth_measured * 0.9;
+      if (t->srtt_target && t->srtt_av < t->srtt_target && (t->bandwidth_measured)>t->bandwidth_max) {
+        t->bandwidth_max=t->bandwidth_measured;
       }
-      
+      if (t->srtt_target && t->srtt_av > t->srtt_target*2 && (t->bandwidth_measured)<(t->bandwidth_max*0.9)) {
+        t->bandwidth_max*=0.99;
+      }
+      if (t->loss_cnt) {
+        t->loss_av=(t->loss_event / t->loss_cnt)*100.0;
+      } else {
+        t->loss_av=0;
+      }
+      t->loss_event=0;
+      t->loss_cnt=0;
     }
     mlvpn_rtun_recalc_weight();
   }
