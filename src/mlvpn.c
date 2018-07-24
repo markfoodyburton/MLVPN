@@ -90,7 +90,7 @@ ev_tstamp lastsent=0;
 uint64_t bandwidthdata=0;
 double bandwidth=0;
 
-static double avtime=2.0;
+static double avtime=3.0;
 
 struct mlvpn_status_s mlvpn_status = {
     .start_time = 0,
@@ -701,7 +701,7 @@ mlvpn_rtun_new(const char *name,
                int server_mode, uint32_t timeout,
                int fallback_only, uint32_t bandwidth_max,
                uint32_t loss_tolerence, uint32_t quota,
-               uint32_t reorder_length, uint32_t srtt_target)
+               uint32_t reorder_length, double srtt_target)
 {
     mlvpn_tunnel_t *new;
 
@@ -745,11 +745,11 @@ mlvpn_rtun_new(const char *name,
     new->last_seen = 0;
     new->saved_timestamp = -1;
     new->saved_timestamp_received_at = 0;
-    new->srtt_target=srtt_target;
     new->srtt = 40;
     new->srtt_av=40;
     new->srtt_av_d=0;
     new->srtt_av_c=0;
+    new->srtt_min=40;
     new->rttvar = 5;
     new->rtt_hit = 0;
     new->seq_last = 0;
@@ -759,6 +759,13 @@ mlvpn_rtun_new(const char *name,
     new->loss_event=0;
     new->loss_av=0;
     new->flow_id = crypto_nonce_random();
+    if (bandwidth_max==0) {
+      log_warn(NULL,
+                "Enabling automatic bandwidth adjustment");
+      bandwidth_max=10000; // faster lines will go up faster from 10000, slower
+                           // ones will drop from here.... it's a compromise
+    }
+    new->srtt_target=srtt_target;
     new->bandwidth_max = bandwidth_max;
     new->bandwidth = bandwidth_max;
     new->bandwidth_measured=0;
@@ -1310,34 +1317,13 @@ void mlvpn_calc_bandwidth(uint32_t len)
       // calc the srtt average...
       t->srtt_av = (t->srtt_av_d / t->srtt_av_c);
       // reset so if we get no traffic, we still see a valid srtt
-      t->srtt_av_d=t->srtt + (4*t->rttvar);;
+      t->srtt_av_d=t->srtt_raw + (4*t->rttvar);;
       t->srtt_av_c=1;
 
       // calc measured bandwidth
       t->bandwidth_measured=((((double)(t->bm_data)*8) / diff))/1000; // kbits/sec
       t->bm_data=0;
 
-//      measure the pipeline length?????
-//        That could give you a bandwidth indication?
-//        you could use just the seq numbers?
-        
-      if (t->srtt_target) {
-        if (t->srtt_av < t->srtt_target*0.9 && t->bandwidth < t->bandwidth_max) {
-          t->bandwidth*=1.05;
-        } else {
-          if (t->srtt_av > t->srtt_target*1.1 && t->bandwidth > (t->bandwidth_max/4)) {
-            t->bandwidth*=0.95;
-          }
-        }
-      }
-
-      
-      if (t->srtt_target && t->srtt_av < t->srtt_target && (t->bandwidth_measured)>t->bandwidth_max) {
-        t->bandwidth_max=t->bandwidth_measured;
-      }
-      if (t->srtt_target && t->srtt_av > t->srtt_target*2 && (t->bandwidth_measured)<(t->bandwidth_max*0.9)) {
-        t->bandwidth_max*=0.99;
-      }
       if (t->loss_cnt) {
         t->loss_av=(t->loss_event / t->loss_cnt)*100.0;
       } else {
@@ -1345,6 +1331,36 @@ void mlvpn_calc_bandwidth(uint32_t len)
       }
       t->loss_event=0;
       t->loss_cnt=0;
+
+      // Hunt a low water mark - ONLY when traffic is low - allow SLOW drift
+      if (t->srtt_av > 0 && t->bandwidth_measured < t->bandwidth_max/5 ) {
+        if (t->srtt_av < t->srtt_min) {
+          t->srtt_min = t->srtt_av;
+        } else {
+            t->srtt_min = ((t->srtt_min*9)+t->srtt_av)/10;
+        }
+      }
+      
+      double target=t->srtt_target>0?t->srtt_target:t->srtt_min*1.25;
+      // hunt a high watermark with slow drift
+      if (t->srtt_av < target) {
+        if (t->bandwidth_measured>t->bandwidth_max) {
+          t->bandwidth_max=t->bandwidth_measured;
+          // we could 'drift' the target here...
+        }
+      } else {
+        if (t->bandwidth*2 < t->bandwidth_max) {
+          t->bandwidth_max *= 0.95;
+        }
+      }
+
+      if (t->srtt_av < target*0.9 && t->bandwidth < t->bandwidth_max) {
+        t->bandwidth*=1.05;
+      } else {
+        if (t->srtt_av > target*1.1 && t->bandwidth > (t->bandwidth_max/4)) {
+          t->bandwidth*=0.95;
+        }
+      }
     }
     mlvpn_rtun_recalc_weight();
   }

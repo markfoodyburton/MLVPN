@@ -91,12 +91,13 @@ mlvpn_rtun_wrr_choose()
 // simply basing things on the SRTT doesn't work, as the srtt is often
 // similar, even though te tunnel can haldle more!
 //    wrr.tunval[idx]+=wrr.tunnel[idx]->srtt_raw;
-    
-    if (wrr.tunnel[idx]->srtt_raw > (wrr.tunnel[idx]->srtt_target*1.5)) {
-      wrr.tunval[idx]+=1; // lock it out for a bit
+
+    double d=(wrr.tunnel[idx]->srtt_raw / srtt_av);
+    if (wrr.tunnel[idx]->srtt_raw > srtt_av * 2) {
+      wrr.tunval[idx]+=d / (wrr.tunnel[idx]->weight/2);
+//      wrr.tunval[idx]+=1; // lock it out for a bit (but '1' is too long)
     } else {
       // Try to 'pull' towards the average srtt
-      double d=(wrr.tunnel[idx]->srtt_av / srtt_av);
       wrr.tunval[idx]+=d / wrr.tunnel[idx]->weight;
     }
   }
