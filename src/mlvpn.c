@@ -419,6 +419,12 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
                 log_debug("protocol", "%s ignoring non authenticated packet",
                     tun->name);
             }
+            // If we have not sent anything for a while, then keep things moving...
+            if ((tun->last_sent < ev_now(EV_DEFAULT_UC) - tun->srtt_av) &&
+                (tun->last_keepalive_ack_sent + 1 < tun->last_keepalive_ack)) {
+                tun->last_keepalive_ack_sent = tun->last_keepalive_ack;
+                mlvpn_rtun_send_keepalive(tun->last_keepalive_ack, tun);
+            }
         } else if (decap_pkt.type == MLVPN_PKT_KEEPALIVE &&
                 tun->status >= MLVPN_AUTHOK) {
             log_debug("protocol", "%s keepalive received", tun->name);
@@ -635,6 +641,8 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
       log_debug("rtt","(%s) No timestamp added, time too long! (%lu > 1000)",tun->name, tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at ));
     }
 
+    tun->last_sent = ev_time();
+    
     proto.timestamp = mlvpn_timestamp16(now64);
     proto.len = htobe16(proto.len);
     proto.tun_seq = htobe64(proto.tun_seq);
@@ -885,7 +893,7 @@ mlvpn_rtun_recalc_weight_prio()
 
     if (bwavailable > 2 * bwneeded) {
 //      bandwidth_max = (realBW * 8)/1000, and we want it for avtime seconds
-        if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*avtime)) && (t->status >= MLVPN_AUTHOK)) {
+        if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*avtime)) && (t->status == MLVPN_AUTHOK)) {
           mlvpn_rtun_set_weight(t, bwneeded/50);
         } else {
           mlvpn_rtun_set_weight(t, 0);
@@ -899,12 +907,12 @@ mlvpn_rtun_recalc_weight_prio()
     // simply remove the weight from the link.
 
     // Should we limit to e.g. 0.8 of the bandwidth here?
-    if ((t->quota == 0) && (t->status >= MLVPN_AUTHOK)) {
+    if ((t->quota == 0) && (t->status == MLVPN_AUTHOK)) {
       mlvpn_rtun_set_weight(t, (t->bandwidth*part));
       bwavailable+=(t->bandwidth*part);
     } else {
       double bw=bwneeded - bwavailable;
-      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth_max*125*avtime)) && (t->status >= MLVPN_AUTHOK)) {
+      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth_max*125*avtime)) && (t->status == MLVPN_AUTHOK)) {
         if (t->bandwidth*part > bw) {
           mlvpn_rtun_set_weight(t, (bw*part));
           bwavailable+=bw*part;
@@ -913,7 +921,7 @@ mlvpn_rtun_recalc_weight_prio()
           bwavailable+=(t->bandwidth*part);
         }
       } else {
-        if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*avtime)) && (t->status >= MLVPN_AUTHOK)) {
+        if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*avtime)) && (t->status == MLVPN_AUTHOK)) {
           mlvpn_rtun_set_weight(t, bwneeded/50);
         } else {
           mlvpn_rtun_set_weight(t, 0);
