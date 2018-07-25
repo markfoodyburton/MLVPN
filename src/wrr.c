@@ -17,14 +17,14 @@ static struct mlvpn_wrr wrr = {
 
 static int wrr_min_index()
 {
-    int min_index = 0;
+    int min_index = -1;
     int i;
-    double min = wrr.tunval[0];
-
+    double min = 0;
+    
     for(i = 0; i < wrr.len; i++)
     {
-      if (wrr.tunnel[i]->quota==0 || wrr.tunnel[i]->permitted>0) {
-        if (wrr.tunval[i] < min) {
+      if (wrr.tunnel[i]->quota==0 || wrr.tunnel[i]->permitted>1500) {
+        if ((min_index==-1 || wrr.tunval[i] < min) && (wrr.tunnel[i]->status >= MLVPN_AUTHOK)) {
           min = wrr.tunval[i];
           min_index = i;
         }
@@ -48,7 +48,7 @@ int mlvpn_rtun_wrr_reset(struct rtunhead *head, int use_fallbacks)
             (t->status == MLVPN_AUTHOK))
         {
             if (wrr.len >= MAX_TUNNELS)
-                fatalx("You have too much tunnels declared");
+                fatalx("You have too many tunnels declared");
             wrr.tunnel[wrr.len] = t;
             wrr.tunval[wrr.len] = 0.0;
             wrr.len++;
@@ -73,6 +73,7 @@ mlvpn_rtun_wrr_choose()
 {
 
   int idx = wrr_min_index();
+  if (idx == -1) return NULL; // no valid tunnels!
   double srtt_av=0;
   for (int i = 0; i< wrr.len; i++) {
     srtt_av+=wrr.tunnel[i]->srtt_av;
@@ -90,11 +91,13 @@ mlvpn_rtun_wrr_choose()
   } else {
 // simply basing things on the SRTT doesn't work, as the srtt is often
 // similar, even though te tunnel can haldle more!
-//    wrr.tunval[idx]+=wrr.tunnel[idx]->srtt_raw;
+// e.g. this doesn't work   wrr.tunval[idx]+=wrr.tunnel[idx]->srtt_raw;
 
     double d=(wrr.tunnel[idx]->srtt_raw / srtt_av);
     if (wrr.tunnel[idx]->srtt_raw > srtt_av * 2) {
       wrr.tunval[idx]+=d / (wrr.tunnel[idx]->weight/2);
+      idx = wrr_min_index();
+      if (idx == -1) return NULL; // no valid tunnels!
 //      wrr.tunval[idx]+=1; // lock it out for a bit (but '1' is too long)
     } else {
       // Try to 'pull' towards the average srtt
