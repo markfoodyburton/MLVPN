@@ -15,18 +15,18 @@ static struct mlvpn_wrr wrr = {
     {0}
 };
 
+double big=0;
+
 static int wrr_min_index()
 {
     int min_index = -1;
     int i;
     double min = 0;
-    ev_tstamp now=ev_now(EV_DEFAULT_UC);
 
     for(i = 0; i < wrr.len; i++)
     {
       if (wrr.tunnel[i]->quota==0 || wrr.tunnel[i]->permitted>1500) {
-        if ((min_index==-1 || wrr.tunval[i] < min) && (wrr.tunnel[i]->status == MLVPN_AUTHOK) &&
-            (wrr.tunnel[i]->last_activity > (now - wrr.tunnel[i]->srtt_av * 2))) {
+        if ((min_index==-1 || wrr.tunval[i] < min) && (wrr.tunnel[i]->status == MLVPN_AUTHOK)) {
           min = wrr.tunval[i];
           min_index = i;
         }

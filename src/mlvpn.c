@@ -419,12 +419,6 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
                 log_debug("protocol", "%s ignoring non authenticated packet",
                     tun->name);
             }
-            // If we have not sent anything for a while, then keep things moving...
-            if ((tun->last_sent < ev_now(EV_DEFAULT_UC) - tun->srtt_av) &&
-                (tun->last_keepalive_ack_sent + 1 < tun->last_keepalive_ack)) {
-                tun->last_keepalive_ack_sent = tun->last_keepalive_ack;
-                mlvpn_rtun_send_keepalive(tun->last_keepalive_ack, tun);
-            }
         } else if (decap_pkt.type == MLVPN_PKT_KEEPALIVE &&
                 tun->status >= MLVPN_AUTHOK) {
             log_debug("protocol", "%s keepalive received", tun->name);
