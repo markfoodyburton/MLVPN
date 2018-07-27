@@ -435,7 +435,13 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
             mlvpn_rtun_status_down(tun);
         } else if (decap_pkt.type == MLVPN_PKT_AUTH ||
                 decap_pkt.type == MLVPN_PKT_AUTH_OK) {
-            mlvpn_rtun_send_auth(tun);
+          // recieve any quota info, if there is any
+          if (decap_pkt.len > 2) {
+            int64_t perm=0;
+            sscanf(&(decap_pkt.data[2]),"%ld", &perm);
+            if (perm > tun->permitted) tun->permitted=perm;
+          }
+          mlvpn_rtun_send_auth(tun);
         } else {
           log_warnx("protocol", "Unknown packet type %d\n", decap_pkt.type);
         }
@@ -1221,6 +1227,12 @@ mlvpn_rtun_challenge_send(mlvpn_tunnel_t *t)
     pkt->data[0] = 'A';
     pkt->data[1] = 'U';
     pkt->len = 2;
+
+    // send quota info
+    if (t->quota) {
+      pkt->len+=sprintf(&(pkt->data[pkt->len]),"%ld",t->permitted) + 1;
+    }
+
     pkt->type = MLVPN_PKT_AUTH;
 
     t->status = MLVPN_AUTHSENT;
@@ -1244,6 +1256,12 @@ mlvpn_rtun_send_auth(mlvpn_tunnel_t *t)
             pkt->data[0] = 'O';
             pkt->data[1] = 'K';
             pkt->len = 2;
+
+            // send quota info
+            if (t->quota) {
+              pkt->len+=sprintf(&(pkt->data[pkt->len]),"%ld",t->permitted) + 1;
+            }
+
             pkt->type = MLVPN_PKT_AUTH_OK;
             if (t->status < MLVPN_AUTHOK)
                 t->status = MLVPN_AUTHSENT;
