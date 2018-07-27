@@ -425,7 +425,7 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
             mlvpn_rtun_tick(tun);
             tun->last_keepalive_ack = ev_now(EV_DEFAULT_UC);
             /* Avoid flooding the network if multiple packets are queued */
-            if (tun->last_keepalive_ack_sent + 1 < tun->last_keepalive_ack) {
+            if (tun->last_keepalive_ack_sent + MLVPN_IO_TIMEOUT_DEFAULT < tun->last_keepalive_ack) {
                 tun->last_keepalive_ack_sent = tun->last_keepalive_ack;
                 mlvpn_rtun_send_keepalive(tun->last_keepalive_ack, tun);
             }
@@ -635,8 +635,6 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
       log_debug("rtt","(%s) No timestamp added, time too long! (%lu > 1000)",tun->name, tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at ));
     }
 
-    tun->last_sent = ev_time();
-    
     proto.timestamp = mlvpn_timestamp16(now64);
     proto.len = htobe16(proto.len);
     proto.tun_seq = htobe64(proto.tun_seq);
@@ -1448,7 +1446,7 @@ mlvpn_rtun_check_timeout(EV_P_ ev_timer *w, int revents)
     mlvpn_tunnel_t *t = w->data;
     ev_tstamp now = ev_now(EV_DEFAULT_UC);
     if (t->status >= MLVPN_AUTHOK && t->timeout > 0) {
-        if ((t->last_keepalive_ack != 0) && (t->last_keepalive_ack + t->timeout) < now) {
+      if ((t->last_keepalive_ack != 0) && (t->last_keepalive_ack + t->timeout + MLVPN_IO_TIMEOUT_DEFAULT + ((t->srtt_av/1000.0)*2)) < now) {
             log_info("protocol", "%s timeout", t->name);
             mlvpn_rtun_status_down(t);
         } else {

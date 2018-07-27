@@ -60,7 +60,7 @@
 #define MLVPN_IFNAMSIZ IFNAMSIZ
 
 /* How frequently we check tunnels */
-#define MLVPN_IO_TIMEOUT_DEFAULT 1.0
+#define MLVPN_IO_TIMEOUT_DEFAULT 0.25
 /* What is the maximum retry timeout */
 #define MLVPN_IO_TIMEOUT_MAXIMUM 60.0
 /* In case we can't open the tunnel, retry every time with previous
@@ -76,7 +76,7 @@
  */
 #define MLVPN_IO_TIMEOUT_INCREMENT 2
 
-#define NEXT_KEEPALIVE(now, t) (now + 2)
+#define NEXT_KEEPALIVE(now, t) (now + MLVPN_IO_TIMEOUT_DEFAULT)
 /* Protocol version of mlvpn
  * version 0: mlvpn 2.0 to 2.1 
  * version 1: mlvpn 2.2+ (add reorder field in mlvpn_proto_t)
@@ -192,7 +192,6 @@ typedef struct mlvpn_tunnel_s
     struct addrinfo *addrinfo;
     enum chap_status status;    /* Auth status */
     ev_tstamp last_activity;
-    ev_tstamp last_sent;
     ev_tstamp last_connection_attempt;
     ev_tstamp next_keepalive;
     ev_tstamp last_keepalive_ack;
