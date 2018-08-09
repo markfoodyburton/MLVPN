@@ -84,7 +84,7 @@ void mlvpn_reorder_enable();
  * @param pkt
  *   pkt that needs to be inserted in reorder buffer.
  */
-void mlvpn_reorder_insert(mlvpn_pkt_t *pkt);
+void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt);
 
 
 #endif /* MLVPN_REORDER_H */

@@ -43,7 +43,6 @@
 
 #include "pkt.h"
 #include "buffer.h"
-#include "reorder.h"
 #include "timestamp.h"
 
 #define MLVPN_MAXHNAMSTR 256
@@ -141,6 +140,8 @@ typedef struct mlvpn_tunnel_s
     uint32_t bindfib;     /* FIB number to use */
     char destaddr[MLVPN_MAXHNAMSTR]; /* remote server ip (can be hostname) */
     char destport[MLVPN_MAXPORTSTR]; /* remote server port */
+    int id;               /* Unique ID which will be shared between tunnel end
+                             points (e.g. port number) */
     int fd;               /* socket file descriptor */
     int server_mode;      /* server or client */
     int disconnects;      /* is it stable ? */
@@ -199,6 +200,9 @@ typedef struct mlvpn_tunnel_s
     ev_io io_read;
     ev_io io_write;
     ev_timer io_timeout;
+
+    mlvpn_pkt_t *old_pkts[PKTBUFSIZE];
+    uint64_t old_pkts_n[PKTBUFSIZE];
 } mlvpn_tunnel_t;
 
 #ifdef HAVE_FILTERS
@@ -233,5 +237,6 @@ mlvpn_tunnel_t *mlvpn_filters_choose(uint32_t pktlen, const u_char *pktdata);
 
 #include "privsep.h"
 #include "log.h"
+#include "reorder.h"
 
 #endif

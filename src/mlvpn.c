@@ -92,6 +92,13 @@ double bandwidth=0;
 
 static double avtime=3.0;
 
+struct resend_data
+{
+  char r,s;
+  uint64_t seqn;
+  int tun_id;
+};
+
 struct mlvpn_status_s mlvpn_status = {
     .start_time = 0,
     .last_reload = 0,
@@ -150,6 +157,7 @@ static void mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents);
 static void mlvpn_rtun_send_keepalive(ev_tstamp now, mlvpn_tunnel_t *t);
 static void mlvpn_rtun_send_disconnect(mlvpn_tunnel_t *t);
 static int mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf);
+static void mlvpn_rtun_resend(struct resend_data *d);
 static void mlvpn_rtun_send_auth(mlvpn_tunnel_t *t);
 static void mlvpn_rtun_status_up(mlvpn_tunnel_t *t);
 static void mlvpn_rtun_tick_connect(mlvpn_tunnel_t *t);
@@ -315,7 +323,7 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
   }
 }
 
-// this isn't the loss ration  because you could have perfectly valid
+#if 0 // this isn't the loss ration  because you could have perfectly valid
 // 'holes'... which will be filled in by re-ordering....
 int
 mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
@@ -324,7 +332,7 @@ mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
     return 0; // for links that are down, report a 0 loss.
   }
   return tun->loss_av;
-#if 0  
+//#if 0  
   int loss = tun->loss;
   /* remove things in the reorder_length 'shadow' */
   for (int i=0;i < tun->reorder_length; i++) {
@@ -335,13 +343,13 @@ mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
   if (loss < 0) loss=0;
 
   return (loss * 100) / 64;
-#endif
+//#endif
 }
-
+#endif
 static void
 mlvpn_rtun_recv_data(mlvpn_tunnel_t *tun, mlvpn_pkt_t *inpkt)
 {
-  mlvpn_reorder_insert( inpkt );
+  mlvpn_reorder_insert( tun, inpkt );
 }
 
 
@@ -411,7 +419,7 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
         log_debug("net", "< %s recv %d bytes (type=%d, seq=%"PRIu64", reorder=%d)",
             tun->name, (int)len, decap_pkt.type, decap_pkt.seq, decap_pkt.reorder);
 
-        if (decap_pkt.type == MLVPN_PKT_DATA) {
+        if (decap_pkt.type == MLVPN_PKT_DATA || decap_pkt.type == MLVPN_PKT_DATA_RESEND) {
             if (tun->status >= MLVPN_AUTHOK) {
                 mlvpn_rtun_tick(tun);
                 mlvpn_rtun_recv_data(tun, &decap_pkt);
@@ -442,11 +450,28 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
             if (perm > tun->permitted) tun->permitted=perm;
           }
           mlvpn_rtun_send_auth(tun);
+        } else if (decap_pkt.type == MLVPN_PKT_RESEND &&
+                tun->status >= MLVPN_AUTHOK) {
+          mlvpn_rtun_resend((struct resend_data *)decap_pkt.data);
         } else {
           log_warnx("protocol", "Unknown packet type %d\n", decap_pkt.type);
         }
     }
 }
+
+int mlvpn_loss_pack(mlvpn_tunnel_t *t)
+{
+  if (t->loss_av >= t->loss_tolerence) {
+    return 31;
+  } else {
+    return (t->loss_av * 31) / t->loss_tolerence;
+  }
+}
+float mlvpn_loss_unpack(mlvpn_tunnel_t *t, uint16_t v)
+{
+  return (v * t->loss_tolerence)/31;
+}
+
 
 static int
 mlvpn_protocol_read(
@@ -482,7 +507,7 @@ mlvpn_protocol_read(
     proto.flow_id = be32toh(proto.flow_id);
     /* now auth the packet using libsodium before further checks */
 #ifdef ENABLE_CRYPTO
-    if (mlvpn_options.cleartext_data && proto.flags == MLVPN_PKT_DATA) {
+    if (mlvpn_options.cleartext_data && (proto.flags == MLVPN_PKT_DATA || proto.flags == MLVPN_PKT_DATA_RESEND)) {
         memcpy(decap_pkt->data, &proto.data, rlen);
     } else {
         sodium_memzero(nonce, sizeof(nonce));
@@ -509,7 +534,7 @@ mlvpn_protocol_read(
                          // use the TUN seq number to
                          // calculate loss
         if (proto.version >=2) {
-          tun->sent_loss=proto.sent_loss;
+          tun->sent_loss=mlvpn_loss_unpack(tun, proto.sent_loss);
         } else {
           tun->sent_loss=0;
         }
@@ -570,11 +595,17 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     } else {
       pkt->reorder = 0;
     }
-    
-    if (pkt->reorder) {
-        proto.data_seq = data_seq++;
+
+    // NB, the 'proto.data_seq' should be removed !
+    if (pkt->type==MLVPN_PKT_DATA_RESEND) {
+      proto.data_seq = pkt->seq;
     } else {
-      proto.data_seq = 0;
+      if (pkt->reorder) {
+        proto.data_seq = data_seq++;
+      } else {
+        proto.data_seq = 0;
+      }
+      pkt->seq=proto.data_seq;
     }
     
     wlen = PKTHDRSIZ(proto) + pkt->len;
@@ -582,17 +613,22 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
 
     proto.len = pkt->len;
     proto.flags = pkt->type;
-//    if (pkt->reorder) {
+
 // we should still use this to measure packet loss even if they are UDP packets
-        proto.tun_seq = tun->seq++;
-//    }
+// tun seq incrememts even if we resend
+    tun->old_pkts_n[tun->seq % PKTBUFSIZE]=tun->seq;
+    tun->old_pkts[tun->seq % PKTBUFSIZE]=pkt;
+    proto.tun_seq = tun->seq++;
+
     proto.flow_id = tun->flow_id;
     proto.version = MLVPN_PROTOCOL_VERSION;
     proto.reorder = pkt->reorder;
-    proto.sent_loss=mlvpn_loss_ratio(tun);
+    proto.sent_loss=mlvpn_loss_pack(tun);
+//    if (tun->loss_av>0)
+//      printf("%s %d %f\n",tun->name,proto.sent_loss, tun->loss_av);
 
     #ifdef ENABLE_CRYPTO
-    if (mlvpn_options.cleartext_data && pkt->type == MLVPN_PKT_DATA) {
+    if (mlvpn_options.cleartext_data && (pkt->type == MLVPN_PKT_DATA || pkt->type == MLVPN_PKT_DATA_RESEND)) {
         memcpy(&proto.data, &pkt->data, pkt->len);
     } else {
         if (wlen + crypto_PADSIZE > sizeof(proto.data)) {
@@ -993,9 +1029,11 @@ mlvpn_rtun_start(mlvpn_tunnel_t *t)
     {
         addr = t->bindaddr;
         port = t->bindport;
+        t->id=atoi(t->bindport);
     } else {
         addr = t->destaddr;
         port = t->destport;
+        t->id=atoi(t->destport);
     }
 
     /* Initialize hints */
@@ -1283,6 +1321,71 @@ mlvpn_rtun_send_auth(mlvpn_tunnel_t *t)
     }
 }
 
+mlvpn_tunnel_t *best_quick_tun()
+{
+  mlvpn_tunnel_t *t, *best=NULL;
+  LIST_FOREACH(t, &rtuns, entries) {
+    if (t->status == MLVPN_AUTHOK &&
+        (!best || t->srtt < best->srtt)) best=t;
+  }
+  return t;
+}
+static void
+mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn)
+{
+    mlvpn_pkt_t *pkt;
+    mlvpn_tunnel_t *t=best_quick_tun();
+    if (mlvpn_cb_is_full(t->hpsbuf))
+        log_warnx("net", "%s high priority buffer: overflow", t->name);
+
+    pkt = mlvpn_pktbuffer_write(t->hpsbuf);
+    struct resend_data *d=(struct resend_data *)(pkt->data);
+    d->r='R';
+    d->s='S';
+    d->seqn=tun_seqn;
+    d->tun_id=loss_tun->id;
+    pkt->len = sizeof(struct resend_data);
+
+    pkt->type = MLVPN_PKT_RESEND;
+
+    log_debug("protocol", "%s request resend %lu", t->name, tun_seqn);
+}
+
+static mlvpn_tunnel_t *mlvpn_find_tun(int id)
+{
+  mlvpn_tunnel_t *t;
+  LIST_FOREACH(t, &rtuns, entries) {
+    if (t->id==id) return t;
+  }
+  return NULL;
+}
+
+static void
+mlvpn_rtun_resend(struct resend_data *d)
+{
+    mlvpn_pkt_t *pkt;
+    mlvpn_tunnel_t *loss_tun=mlvpn_find_tun(d->tun_id);
+    if (loss_tun && loss_tun->old_pkts_n[d->seqn % PKTBUFSIZE] == d->seqn) {
+      mlvpn_pkt_t *old_pkt=loss_tun->old_pkts[d->seqn % PKTBUFSIZE];
+      if (old_pkt->reorder) { // refuse to resend UDP packets!
+
+        mlvpn_tunnel_t *t=best_quick_tun();
+        if (mlvpn_cb_is_full(t->hpsbuf))
+          log_warnx("net", "%s high priority buffer: overflow", t->name);
+
+        pkt = mlvpn_pktbuffer_write(t->hpsbuf);
+        memcpy(pkt, old_pkt, sizeof(mlvpn_pkt_t));
+        pkt->type=MLVPN_PKT_DATA_RESEND;
+
+        log_debug("protocol", "resend on tunnel %s, seq %lu (previously sent on %s)", t->name, d->seqn, loss_tun->name);
+      }
+
+    } else {
+      log_debug("protocol", "unable to resend seq %lu",d->seqn);
+    }
+}
+
+
 static void
 mlvpn_rtun_tick_connect(mlvpn_tunnel_t *t)
 {
@@ -1343,9 +1446,14 @@ void mlvpn_calc_bandwidth(uint32_t len)
       t->bm_data=0;
 
       if (t->loss_cnt) {
-        t->loss_av=(t->loss_event / t->loss_cnt)*100.0;
+//        t->loss_av=t->loss_event/diff;
+        t->loss_av=(t->loss_event * 100.0/ t->loss_cnt); // percent
       } else {
-        t->loss_av=0;
+        if (t->loss_event) {
+          t->loss_av=100.0;
+        } else {
+          t->loss_av=0;
+        }
       }
       t->loss_event=0;
       t->loss_cnt=0;

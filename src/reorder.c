@@ -44,7 +44,6 @@
 #include <sys/queue.h>
 #include <ev.h>
 
-#include "reorder.h"
 #include "log.h"
 
 #include "mlvpn.h"
@@ -99,13 +98,16 @@ double mlvpn_total_loss()
 void mlvpn_reorder_drain_timeout(EV_P_ ev_timer *w, int revents)
 {
     log_debug("reorder", "reorder timeout. Packet loss?");
-//    printf("reorder timeout\n");
     struct mlvpn_reorder_buffer *b=reorder_buffer;
 
     if (!TAILQ_EMPTY(&b->list)) {
-      b->min_seqn=TAILQ_LAST(&b->list, list_t)->pkt.seq; // Jump over any hole !!!!
-    }
+      if (b->min_seqn != TAILQ_LAST(&b->list, list_t)->pkt.seq) {
+        b->min_seqn=TAILQ_LAST(&b->list, list_t)->pkt.seq; // Jump over any hole !!!!
+        b->loss++;
+//        printf("Timeout loss\n");
+      }
     mlvpn_reorder_drain();
+    }
 }
 
 // Called once from main.
@@ -146,10 +148,28 @@ void mlvpn_reorder_adjust_timeout(double t)
 //  printf("rtt %f\n", reorder_drain_timeout.repeat);
 }
 
-void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
+void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
 {
   struct mlvpn_reorder_buffer *b=reorder_buffer;
-  if (!b->enabled || !pkt->reorder || !pkt->seq) {
+  if (!b->enabled || !pkt->reorder || !pkt->seq || pkt->seq==b->min_seqn)
+  {
+    if (pkt->seq) {
+      b->min_seqn = pkt->seq+1;
+    }
+    return mlvpn_rtun_inject_tuntap(pkt);
+  }
+
+  if ((!b->is_initialized) ||
+      ((int64_t)(b->min_seqn - pkt->seq) > 1000 && pkt->seq < 1000))
+  {
+    b->min_seqn = pkt->seq;
+    b->is_initialized = 1;
+    log_debug("reorder", "initial sequence: %"PRIu64"", pkt->seq);
+  }
+
+  if (((int64_t)(b->min_seqn - pkt->seq) > 0)) {
+    log_debug("reorder", "got old insert %d behind (probably agressive pruning) on %s\n",(int)(b->min_seqn - pkt->seq), tun->name);
+    b->loss++;
     return mlvpn_rtun_inject_tuntap(pkt);
   }
 
@@ -164,13 +184,6 @@ void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
 
   p->timestamp = ev_now(EV_DEFAULT_UC);
 
-  if ((!b->is_initialized) ||
-      ((int64_t)(b->min_seqn - pkt->seq) > 1000 && pkt->seq < 1000))
-  {
-    b->min_seqn = pkt->seq;
-    b->is_initialized = 1;
-    log_debug("reorder", "initial sequence: %"PRIu64"", pkt->seq);
-  }
 
     
     /*
@@ -196,10 +209,12 @@ void mlvpn_reorder_insert(mlvpn_pkt_t *pkt)
   if (b->list_size > b->list_size_max) {
     b->list_size_max = b->list_size;
   }
-  if (TAILQ_LAST(&b->list,list_t) && ((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq) > 0)) {
-    log_debug("reorder", "got old insert %d behind (probably fluctuating RTT)\n",(int)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq));
+//  if (TAILQ_LAST(&b->list,list_t) && ((int64_t)(b->min_seqn -
+//  TAILQ_LAST(&b->list,list_t)->pkt.seq) > 0)) {
+//  if (((int64_t)(b->min_seqn - p->pkt.seq) > 0)) {
+//    log_debug("reorder", "got old insert %d behind (probably fluctuating RTT)\n",(int)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq));
 //    printf("got old insert %d behind (probably fluctuating RTT)\n",(int)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq));
-  }
+//  }
 
   mlvpn_reorder_drain(); // now see what canbe drained off
 }
@@ -210,13 +225,14 @@ void mlvpn_reorder_drain()
   unsigned int drain_cnt = 0;
   ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat);
 
-
   // If there is no chance of getting a packet (it's older than the latest
   // packet seen on an ACTIVE  tunnel - the maximum reorder_length),
   // then consider it lost
   uint64_t oldest=0;
+  if (b->min_seqn != TAILQ_LAST(&b->list,list_t)->pkt.seq)
   {
     mlvpn_tunnel_t *t;
+    mlvpn_tunnel_t *ptun;
     LIST_FOREACH(t, &rtuns, entries) {
       if (t->reorder_length
           && t->status >= MLVPN_AUTHOK
@@ -224,32 +240,40 @@ void mlvpn_reorder_drain()
 // if there has been acivity in the last 3 seconds, we'll assume this tunnel isn't dead.
 // better keep all the tunnels 'active' to make sure that there is traffic on all tunnels, so we can prune better !!!!
           ) {
-        uint64_t o=(t->last_seen - t->reorder_length);
+        uint64_t o=(t->last_seen - (t->reorder_length));
         if (!oldest || ((int64_t)(oldest-o))>=0) {
           oldest=o;
+          ptun=t;
         }
       }
     }
-  }
-  if (oldest==0 || (int64_t)(b->min_seqn - oldest)>=0) 
-  {
+
+    if (oldest==0 || (int64_t)(b->min_seqn - oldest)>=0) 
+    {
+      oldest=b->min_seqn;
+    } else {
+      printf("Pruning %lu (from %s reorder %d)\n",oldest - b->min_seqn, ptun->name, ptun->reorder_length);
+    }
+  } else {
     oldest=b->min_seqn;
   }
 
-
-  
   while
     (!TAILQ_EMPTY(&b->list) &&
-         (((int64_t)(oldest - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)
-          || (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
-//          || b->list_size>128
-           ))
+     (((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)
+      || ((int64_t)(oldest - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)
+      || (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
+//      || b->list_size>200
+       ))
     {
 
     struct pkttailq *l = TAILQ_LAST(&b->list,list_t);
 
-    mlvpn_rtun_inject_tuntap(&l->pkt);
-    
+// should we drop out-of-order?    
+//    if (l->pkt.seq == b->min_seqn) {
+      mlvpn_rtun_inject_tuntap(&l->pkt);
+//    }
+
     TAILQ_REMOVE(&b->list, l, entry);
     TAILQ_INSERT_TAIL(&b->pool, l, entry);
 
@@ -260,13 +284,14 @@ void mlvpn_reorder_drain()
       b->delivered++;
     } else {
       b->loss++;
+      printf("Loss\n");
     }
     
     if ((int64_t)(b->min_seqn - l->pkt.seq)<=0) {
       b->min_seqn=l->pkt.seq+1;
     }
   }
-  
+
   if (TAILQ_EMPTY(&b->list)) {
     ev_timer_stop(EV_A_ &reorder_drain_timeout);
   } else {
