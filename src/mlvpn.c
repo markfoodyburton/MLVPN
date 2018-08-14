@@ -1366,7 +1366,7 @@ mlvpn_rtun_resend(struct resend_data *d)
     mlvpn_pkt_t *old_pkt=loss_tun->old_pkts[d->seqn % PKTBUFSIZE];
     if (old_pkt->reorder) { // refuse to resend UDP packets!
       mlvpn_tunnel_t *t=best_quick_tun();
-      if (!t) {
+      if (t) {
         if (mlvpn_cb_is_full(t->hpsbuf))
           log_warnx("net", "%s high priority buffer: overflow", t->name);
         pkt = mlvpn_pktbuffer_write(t->hpsbuf);

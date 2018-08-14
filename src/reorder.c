@@ -68,7 +68,7 @@ struct mlvpn_reorder_buffer {
   uint64_t delivered;
   uint64_t inboundpps;
   uint64_t inboundpkts;
-//  double ideal_len;
+  double ideal_len;
   TAILQ_HEAD(list_t, pkttailq) list, pool;
 };
 static struct mlvpn_reorder_buffer *reorder_buffer;
@@ -151,8 +151,7 @@ void mlvpn_reorder_enable()
 // t given in ms
 void mlvpn_reorder_adjust_timeout(double srtt)
 {
-  srtt*=7.0;  // window size
-  reorder_drain_timeout.repeat = (srtt)/1000.0;//2.2;// ((reorder_drain_timeout.repeat*9)+ t)/10;
+  reorder_drain_timeout.repeat = (srtt*7.0)/1000.0;//2.2;// ((reorder_drain_timeout.repeat*9)+ t)/10;
   log_debug("reorder", "adjusting reordering drain timeout to %.0fs", reorder_drain_timeout.repeat );
 //  printf("rtt %f\n", reorder_drain_timeout.repeat);
 
@@ -160,7 +159,6 @@ void mlvpn_reorder_adjust_timeout(double srtt)
 
   b->inboundpps=b->inboundpkts/*/we are called each second*/;
   b->inboundpkts=0;
-//  b->ideal_len=0;
 
   /* Ideal size of the reorder buffer is long enough to get a resent back, if we
    have a loss. So (the bandwidth requested/8) /1500 = number of packets / s
@@ -169,7 +167,9 @@ void mlvpn_reorder_adjust_timeout(double srtt)
      (NB srtt in seconds (e.g. /1000).
      only problme - we dont know what the incomming bandwidth is !
 */
-//  b->ideal_len=((b->ideal_len*3.0)+((double)b->inboundpps*srtt)/1000.0)/4.0;
+  b->ideal_len=((b->ideal_len*3.0)+((double)b->inboundpps*srtt*2.0)/1000.0)/4.0;
+//  printf("Ideal %f\n",b->ideal_len);
+
 }
 
 void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
@@ -316,12 +316,12 @@ void mlvpn_reorder_drain()
     (!TAILQ_EMPTY(&b->list) &&
      (((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)
 //      || ((int64_t)(oldest - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)
-      || (/*b->list_size > b->ideal_len &&*/ (TAILQ_LAST(&b->list,list_t)->timestamp < cut))
+      || (b->list_size > b->ideal_len && (TAILQ_LAST(&b->list,list_t)->timestamp < cut))
 //      || b->list_size>200
        ))
     {
       if (!((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)) {
-        printf("Clearing size %d  last %f cut %f\n", b->list_size, /*b->ideal_len,*/ TAILQ_LAST(&b->list,list_t)->timestamp, cut);
+        log_debug("reorder","Clearing size %d (ideal %f) last %f cut %f", b->list_size, b->ideal_len, TAILQ_LAST(&b->list,list_t)->timestamp, cut);
       }
     struct pkttailq *l = TAILQ_LAST(&b->list,list_t);
 
