@@ -158,6 +158,7 @@ static void mlvpn_rtun_send_keepalive(ev_tstamp now, mlvpn_tunnel_t *t);
 static void mlvpn_rtun_send_disconnect(mlvpn_tunnel_t *t);
 static int mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf);
 static void mlvpn_rtun_resend(struct resend_data *d);
+static void mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn);
 static void mlvpn_rtun_send_auth(mlvpn_tunnel_t *t);
 static void mlvpn_rtun_status_up(mlvpn_tunnel_t *t);
 static void mlvpn_rtun_tick_connect(mlvpn_tunnel_t *t);
@@ -254,8 +255,8 @@ mlvpn_sock_set_nonblocking(int fd)
 }
 
 inline static 
-void mlvpn_rtun_tick(mlvpn_tunnel_t *t) {
-    t->last_activity = ev_now(EV_DEFAULT_UC);
+void mlvpn_rtun_tick(mlvpn_tunnel_t *tun) {
+    tun->last_activity = ev_now(EV_DEFAULT_UC);
 }
 
 /* Inject the packet to the tuntap device (real network) */
@@ -287,7 +288,9 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
         tun->loss--; // We're nolonger counting that loss it happend some time
                      // ago (or the re-order is HUGE!
       }
-      if ((tun->seq_vect & (1ul<<(tun->reorder_length_preset+1)))==0) {
+      if ((tun->seq_vect & (1ul<<(tun->reorder_length+1)))==0) {
+        log_debug("loss","%s lost %lu new seq %lu last seq %lu vector: %lx (reorder length: %d)",tun->name, tun->seq_last+i-(tun->reorder_length+1), seq, tun->seq_last, tun->seq_vect, tun->reorder_length);
+        mlvpn_rtun_request_resend(tun, tun->seq_last+i-(tun->reorder_length+1));
         tun->loss_event++;
       }
       tun->seq_vect<<=1;
@@ -298,7 +301,7 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
 
     tun->seq_last = seq;
 
-    if (!tun->loss) {
+    if (tun->seq_vect==(uint64_t)-1  /* !tun->loss*/) {
       if (tun->reorder_length > tun->reorder_length_preset) {
         tun->reorder_length--;
       }
@@ -309,6 +312,10 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
       tun->loss--;
     }
     int d=(tun->seq_last - seq)+1;
+    if (tun->reorder_length < (tun->seq_last - seq)) {
+      log_debug("loss","Erronious loss %s, found %lu, %d behind reorder length (new RL %d)",tun->name, seq, d-tun->reorder_length,d);
+    }
+    if (d>63) d=63;
     if (tun->reorder_length <= d) {
       tun->reorder_length = d;
       if (d > tun->reorder_length_max) {
@@ -323,29 +330,6 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
   }
 }
 
-#if 0 // this isn't the loss ration  because you could have perfectly valid
-// 'holes'... which will be filled in by re-ordering....
-int
-mlvpn_loss_ratio(mlvpn_tunnel_t *tun)
-{
-  if (tun->status < MLVPN_AUTHOK) {
-    return 0; // for links that are down, report a 0 loss.
-  }
-  return tun->loss_av;
-//#if 0  
-  int loss = tun->loss;
-  /* remove things in the reorder_length 'shadow' */
-  for (int i=0;i < tun->reorder_length; i++) {
-    if ( (1 & (tun->seq_vect >> i)) == 0 ) {
-      loss--;
-    }
-  }
-  if (loss < 0) loss=0;
-
-  return (loss * 100) / 64;
-//#endif
-}
-#endif
 static void
 mlvpn_rtun_recv_data(mlvpn_tunnel_t *tun, mlvpn_pkt_t *inpkt)
 {
@@ -454,7 +438,9 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
                 tun->status >= MLVPN_AUTHOK) {
           mlvpn_rtun_resend((struct resend_data *)decap_pkt.data);
         } else {
-          log_warnx("protocol", "Unknown packet type %d\n", decap_pkt.type);
+          if (tun->status >= MLVPN_AUTHOK) {
+            log_warnx("protocol", "Unknown packet type %d\n", decap_pkt.type);
+          }
         }
     }
 }
@@ -802,7 +788,7 @@ mlvpn_rtun_new(const char *name,
     new->loss_av=0;
     new->flow_id = crypto_nonce_random();
     if (bandwidth_max==0) {
-      log_warn(NULL,
+      log_warnx("config",
                 "Enabling automatic bandwidth adjustment");
       bandwidth_max=10000; // faster lines will go up faster from 10000, slower
                            // ones will drop from here.... it's a compromise
@@ -919,7 +905,7 @@ mlvpn_rtun_recalc_weight_prio()
 
     
   mlvpn_tunnel_t *t;
-  double bwneeded=bandwidth * 2; /* do we need headroom e.g. * 1.5*/;
+  double bwneeded=bandwidth * 5; /* do we need headroom e.g. * 1.5*/;
   double bwavailable=0;
   LIST_FOREACH(t, &rtuns, entries) {
     if (t->bandwidth == 0) // bail out, we need to know the bandwidths to share
@@ -1185,6 +1171,10 @@ mlvpn_rtun_status_up(mlvpn_tunnel_t *t)
     t->last_activity = now;
     t->last_keepalive_ack = now;
     t->last_keepalive_ack_sent = now;
+    t->srtt_av=40;
+    t->srtt_av_d=0;
+    t->srtt_av_c=0;
+    t->loss_av=0;
     mlvpn_update_status();
     mlvpn_rtun_wrr_reset(&rtuns, mlvpn_status.fallback_mode);
     mlvpn_script_get_env(&env_len, &env);
@@ -1209,6 +1199,12 @@ mlvpn_rtun_status_down(mlvpn_tunnel_t *t)
     enum chap_status old_status = t->status;
     t->status = MLVPN_DISCONNECTED;
     t->disconnects++;
+    t->srtt_av=0;
+    t->srtt_av_d=0;
+    t->srtt_av_c=0;
+    t->srtt_raw=0;
+    t->loss_av=100;
+
     mlvpn_pktbuffer_reset(t->sbuf);
     mlvpn_pktbuffer_reset(t->hpsbuf);
     if (ev_is_active(&t->io_write)) {
@@ -1328,16 +1324,17 @@ mlvpn_tunnel_t *best_quick_tun()
     if (t->status == MLVPN_AUTHOK &&
         (!best || t->srtt < best->srtt)) best=t;
   }
-  return t;
+  return best;
 }
+
 static void
 mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn)
 {
     mlvpn_pkt_t *pkt;
     mlvpn_tunnel_t *t=best_quick_tun();
+    if (!t) return;
     if (mlvpn_cb_is_full(t->hpsbuf))
         log_warnx("net", "%s high priority buffer: overflow", t->name);
-
     pkt = mlvpn_pktbuffer_write(t->hpsbuf);
     struct resend_data *d=(struct resend_data *)(pkt->data);
     d->r='R';
@@ -1348,7 +1345,7 @@ mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn)
 
     pkt->type = MLVPN_PKT_RESEND;
 
-    log_debug("protocol", "%s request resend %lu", t->name, tun_seqn);
+    log_debug("resend", "On %s request resend %lu (lost from tunnel %s)", t->name, tun_seqn, loss_tun->name);
 }
 
 static mlvpn_tunnel_t *mlvpn_find_tun(int id)
@@ -1363,26 +1360,26 @@ static mlvpn_tunnel_t *mlvpn_find_tun(int id)
 static void
 mlvpn_rtun_resend(struct resend_data *d)
 {
-    mlvpn_pkt_t *pkt;
-    mlvpn_tunnel_t *loss_tun=mlvpn_find_tun(d->tun_id);
-    if (loss_tun && loss_tun->old_pkts_n[d->seqn % PKTBUFSIZE] == d->seqn) {
-      mlvpn_pkt_t *old_pkt=loss_tun->old_pkts[d->seqn % PKTBUFSIZE];
-      if (old_pkt->reorder) { // refuse to resend UDP packets!
-
-        mlvpn_tunnel_t *t=best_quick_tun();
+  mlvpn_pkt_t *pkt;
+  mlvpn_tunnel_t *loss_tun=mlvpn_find_tun(d->tun_id);
+  if (loss_tun && loss_tun->old_pkts_n[d->seqn % PKTBUFSIZE] == d->seqn) {
+    mlvpn_pkt_t *old_pkt=loss_tun->old_pkts[d->seqn % PKTBUFSIZE];
+    if (old_pkt->reorder) { // refuse to resend UDP packets!
+      mlvpn_tunnel_t *t=best_quick_tun();
+      if (!t) {
         if (mlvpn_cb_is_full(t->hpsbuf))
           log_warnx("net", "%s high priority buffer: overflow", t->name);
-
         pkt = mlvpn_pktbuffer_write(t->hpsbuf);
         memcpy(pkt, old_pkt, sizeof(mlvpn_pkt_t));
         pkt->type=MLVPN_PKT_DATA_RESEND;
-
-        log_debug("protocol", "resend on tunnel %s, seq %lu (previously sent on %s)", t->name, d->seqn, loss_tun->name);
+        log_debug("resend", "resend on tunnel %s, seq %lu (previously sent on %s)", t->name, d->seqn, loss_tun->name);
+      } else {
+        log_debug("protocol", "All tunnels down, unable to resend seq %lu",d->seqn); 
       }
-
-    } else {
-      log_debug("protocol", "unable to resend seq %lu",d->seqn);
     }
+  } else {
+    log_debug("resend", "unable to resend seq %lu",d->seqn);
+  }
 }
 
 
@@ -1447,9 +1444,9 @@ void mlvpn_calc_bandwidth(uint32_t len)
 
       if (t->loss_cnt) {
 //        t->loss_av=t->loss_event/diff;
-        t->loss_av=(t->loss_event * 100.0/ t->loss_cnt); // percent
+        t->loss_av=((t->loss_av*3.0) + (t->loss_event * 100.0/ t->loss_cnt))/4.0; // percent
       } else {
-        if (t->loss_event) {
+        if (t->loss_event || t->status!=MLVPN_AUTHOK) {
           t->loss_av=100.0;
         } else {
           t->loss_av=0;
@@ -1475,7 +1472,7 @@ void mlvpn_calc_bandwidth(uint32_t len)
           // we could 'drift' the target here...
         }
       } else {
-        if (t->bandwidth*2 < t->bandwidth_max) {
+        if (t->bandwidth*2 < t->bandwidth_max && t->bandwidth_max > 10) {
           t->bandwidth_max *= 0.95;
         }
       }
@@ -1533,37 +1530,45 @@ static void
 mlvpn_rtun_check_lossy(mlvpn_tunnel_t *tun)
 {
   int loss = tun->sent_loss;
-    int status_changed = 0;
-    if (loss >= tun->loss_tolerence && tun->status == MLVPN_AUTHOK) {
-        log_info("rtt", "%s packet loss reached threashold: %d%%/%d%%",
-            tun->name, loss, tun->loss_tolerence);
-        tun->status = MLVPN_LOSSY;
+  int status_changed = 0;
+  ev_tstamp now = ev_now(EV_DEFAULT_UC);
+  int keepalive_ok= ((tun->last_keepalive_ack != 0) || (tun->last_keepalive_ack + MLVPN_IO_TIMEOUT_DEFAULT*2 + ((tun->srtt_av/1000.0)*2)) > now);
+
+  if (!keepalive_ok && tun->status == MLVPN_AUTHOK) {
+    log_info("rtt", "%s keepalive reached threashold, keepalive recieved %fs ago", tun->name, now-tun->last_keepalive_ack);
+    tun->status = MLVPN_LOSSY;
 //        mlvpn_rtun_status_down(tun);
-        status_changed = 1;
-    } else if (loss < tun->loss_tolerence && tun->status == MLVPN_LOSSY) {
-        log_info("rtt", "%s packet loss acceptable again: %d%%/%d%%",
-            tun->name, loss, tun->loss_tolerence);
-        tun->status = MLVPN_AUTHOK;
-        status_changed = 1;
+    status_changed = 1;
+  } else if (loss >= tun->loss_tolerence && tun->status == MLVPN_AUTHOK) {
+    log_info("rtt", "%s packet loss reached threashold: %d%%/%d%%",
+             tun->name, loss, tun->loss_tolerence);
+    tun->status = MLVPN_LOSSY;
+//        mlvpn_rtun_status_down(tun);
+    status_changed = 1;
+  } else if (keepalive_ok && loss < tun->loss_tolerence && tun->status == MLVPN_LOSSY) {
+    log_info("rtt", "%s packet loss acceptable again: %d%%/%d%%",
+             tun->name, loss, tun->loss_tolerence);
+    tun->status = MLVPN_AUTHOK;
+    status_changed = 1;
+  }
+  /* are all links in lossy mode ? switch to fallback ? */
+  if (status_changed) {
+    mlvpn_tunnel_t *t;
+    LIST_FOREACH(t, &rtuns, entries) {
+      if (! t->fallback_only && t->status != MLVPN_LOSSY) {
+        mlvpn_status.fallback_mode = 0;
+        mlvpn_rtun_wrr_reset(&rtuns, mlvpn_status.fallback_mode);
+        return;
+      }
     }
-    /* are all links in lossy mode ? switch to fallback ? */
-    if (status_changed) {
-        mlvpn_tunnel_t *t;
-        LIST_FOREACH(t, &rtuns, entries) {
-            if (! t->fallback_only && t->status != MLVPN_LOSSY) {
-                mlvpn_status.fallback_mode = 0;
-                mlvpn_rtun_wrr_reset(&rtuns, mlvpn_status.fallback_mode);
-                return;
-            }
-        }
-        if (mlvpn_options.fallback_available) {
-            log_info(NULL, "all tunnels are down or lossy, switch fallback mode");
-            mlvpn_status.fallback_mode = 1;
-            mlvpn_rtun_wrr_reset(&rtuns, mlvpn_status.fallback_mode);
-        } else {
-            log_info(NULL, "all tunnels are down or lossy but fallback is not available");
-        }
+    if (mlvpn_options.fallback_available) {
+      log_info(NULL, "all tunnels are down or lossy, switch fallback mode");
+      mlvpn_status.fallback_mode = 1;
+      mlvpn_rtun_wrr_reset(&rtuns, mlvpn_status.fallback_mode);
+    } else {
+      log_info(NULL, "all tunnels are down or lossy but fallback is not available");
     }
+  }
 }
 
 static void
@@ -1608,16 +1613,11 @@ mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents)
         }
     }
 
-    /* Update the reorder algorithm */
     if (max_srtt > 0) {
-        /* Apply a factor to the srtt in order to get a window */
-//        max_srtt *= 2.2;
-        log_debug("reorder", "adjusting reordering drain timeout to %.0fms",  max_srtt);
-//        printf("normal timout set %f\n",max_srtt);
-        mlvpn_reorder_adjust_timeout(max_srtt / 1000.0);
+        /* factor applied within reorder unit to get a window */
+        mlvpn_reorder_adjust_timeout(max_srtt);
     } else {
-//        printf("assumed timout set 800\n");
-        mlvpn_reorder_adjust_timeout(0.8); /* Conservative 800ms shot */
+        mlvpn_reorder_adjust_timeout(800); /* Conservative 800ms shot */
     }
 }
 

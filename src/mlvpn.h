@@ -150,7 +150,7 @@ typedef struct mlvpn_tunnel_s
     uint32_t loss_tolerence; /* How much loss is acceptable before the link is
                               * discarded */
     uint16_t loss;        /* our loss */
-    uint16_t sent_loss;   /* loss as reported by far end */
+    double sent_loss;   /* loss as reported by far end */
     uint64_t loss_cnt;
     uint64_t loss_event;
     double loss_av;

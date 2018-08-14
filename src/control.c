@@ -71,9 +71,9 @@ extern double mlvpn_total_loss();
     "   \"sentbytes\": %" PRIu64 ",\n" \
     "   \"recvbytes\": %" PRIu64 ",\n" \
     "   \"bandwidth\": %u,\n" \
-    "   \"srtt\": %u,\n" \
-    "   \"lossin\": %u,\n" \
-    "   \"lossout\": %u,\n" \
+    "   \"srtt\": %.3f,\n" \
+    "   \"lossin\": %.3f,\n" \
+    "   \"lossout\": %.3f,\n" \
     "   \"reorder_length\": %u,\n"     \
     "   \"permitted\": %u,\n" \
     "   \"disconnects\": %u,\n" \
@@ -438,8 +438,8 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl)
                        t->sentbytes,
                        t->recvbytes,
                        t->bandwidth,
-                       (uint32_t)t->srtt_av,
-                       (uint32_t)t->loss_av,//mlvpn_loss_ratio(t),
+                       t->srtt_av,
+                       t->loss_av,
                        t->sent_loss,
                        t->reorder_length_max,
                        (uint32_t)(t->permitted/1000000),

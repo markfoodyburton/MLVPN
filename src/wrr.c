@@ -81,6 +81,7 @@ mlvpn_rtun_wrr_choose()
     srtt_av+=wrr.tunnel[i]->srtt_av;
   }
   srtt_av/=wrr.len;
+  if (srtt_av < 1) srtt_av=1;
   
   if (wrr.tunval[idx]<=0 || wrr.tunval[idx] > 1000000) {
     for (int i = 0; i< wrr.len; i++) {
@@ -96,16 +97,20 @@ mlvpn_rtun_wrr_choose()
 // e.g. this doesn't work   wrr.tunval[idx]+=wrr.tunnel[idx]->srtt_raw;
 
     double d=(wrr.tunnel[idx]->srtt_raw / srtt_av);
-    if (wrr.tunnel[idx]->srtt_raw > srtt_av * 2) {
-      wrr.tunval[idx]+=d / (wrr.tunnel[idx]->weight/2);
-      idx = wrr_min_index();
-      if (idx == -1) return NULL; // no valid tunnels!
-//      wrr.tunval[idx]+=1; // lock it out for a bit (but '1' is too long)
+    if (wrr.tunnel[idx]->weight<=2) {
+        wrr.tunval[idx]+=d;
     } else {
-      // Try to 'pull' towards the average srtt
-      wrr.tunval[idx]+=d / wrr.tunnel[idx]->weight;
+      if (wrr.tunnel[idx]->srtt_raw > srtt_av * 2) {
+        wrr.tunval[idx]+=d / (wrr.tunnel[idx]->weight/2);
+        idx = wrr_min_index();
+        if (idx == -1) return NULL; // no valid tunnels!
+//      wrr.tunval[idx]+=1; // lock it out for a bit (but '1' is too long)
+      } else {
+        // Try to 'pull' towards the average srtt
+        wrr.tunval[idx]+=d / wrr.tunnel[idx]->weight;
+      }
     }
   }
-  
+
   return wrr.tunnel[idx];
 }
