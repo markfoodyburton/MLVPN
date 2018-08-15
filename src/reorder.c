@@ -135,14 +135,16 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
 //      }
     }
   }
-  max_srtt/=ts;
+  if (ts>0) {
+    max_srtt/=ts;
+  }
   
   if (max_srtt <= 0) {
     max_srtt=800;
   }
 
 
-  reorder_drain_timeout.repeat = (max_srtt*2.2)/1000.0;//2.2;// ((reorder_drain_timeout.repeat*9)+ t)/10;
+  reorder_drain_timeout.repeat = (max_srtt*5.2)/1000.0;//2.2;// ((reorder_drain_timeout.repeat*9)+ t)/10;
   log_debug("reorder", "adjusting reordering drain timeout to %.0fms", reorder_drain_timeout.repeat*1000 );
 //  printf("rtt %f\n", reorder_drain_timeout.repeat);
 
@@ -196,6 +198,8 @@ mlvpn_reorder_reset()
 
 void mlvpn_reorder_enable()
 {
+  reorder_drain_timeout.repeat = 0.8;
+  ev_timer_start(EV_A_ &reorder_timeout_tick);
   reorder_buffer->enabled=1;
 }
 
@@ -228,7 +232,6 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
     b->min_seqn = pkt->seq;
     b->is_initialized = 1;
     log_debug("reorder", "initial sequence: %"PRIu64"", pkt->seq);
-  ev_timer_start(EV_A_ &reorder_timeout_tick);
   }
 
   if (((int64_t)(b->min_seqn - pkt->seq) > 0)) {
