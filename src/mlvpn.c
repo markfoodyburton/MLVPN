@@ -80,7 +80,6 @@ struct tuntap_s tuntap;
 char *_progname;
 static char **saved_argv;
 struct ev_loop *loop;
-static ev_timer reorder_adjust_rtt_timeout;
 char *status_command = NULL;
 char *process_title = NULL;
 int logdebug = 0;
@@ -153,7 +152,6 @@ static int mlvpn_rtun_start(mlvpn_tunnel_t *t);
 static void mlvpn_rtun_read(EV_P_ ev_io *w, int revents);
 static void mlvpn_rtun_write(EV_P_ ev_io *w, int revents);
 static void mlvpn_rtun_check_timeout(EV_P_ ev_timer *w, int revents);
-static void mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents);
 static void mlvpn_rtun_send_keepalive(ev_tstamp now, mlvpn_tunnel_t *t);
 static void mlvpn_rtun_send_disconnect(mlvpn_tunnel_t *t);
 static int mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf);
@@ -405,8 +403,8 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
 
         if (decap_pkt.type == MLVPN_PKT_DATA || decap_pkt.type == MLVPN_PKT_DATA_RESEND) {
             if (tun->status >= MLVPN_AUTHOK) {
-                mlvpn_rtun_tick(tun);
-                mlvpn_rtun_recv_data(tun, &decap_pkt);
+              mlvpn_rtun_tick(tun);
+              mlvpn_rtun_recv_data(tun, &decap_pkt);
             } else {
                 log_debug("protocol", "%s ignoring non authenticated packet",
                     tun->name);
@@ -524,9 +522,9 @@ mlvpn_protocol_read(
         } else {
           tun->sent_loss=0;
         }
-        if (decap_pkt->reorder && decap_pkt->seq) {// > tun->last_seen) {
-          tun->last_seen=decap_pkt->seq;
-        }
+//        if (decap_pkt->reorder && decap_pkt->seq) {// > tun->last_seen) {
+//          tun->last_seen=decap_pkt->seq;
+//        }
     } else {
         decap_pkt->reorder = 0;
         decap_pkt->seq = 0;
@@ -770,7 +768,7 @@ mlvpn_rtun_new(const char *name,
     new->reorder_length_preset= reorder_length;
     new->reorder_length_max=0;
     new->seq = 0;
-    new->last_seen = 0;
+//    new->last_seen = 0;
     new->saved_timestamp = -1;
     new->saved_timestamp_received_at = 0;
     new->srtt = 40;
@@ -1317,11 +1315,12 @@ mlvpn_rtun_send_auth(mlvpn_tunnel_t *t)
     }
 }
 
-mlvpn_tunnel_t *best_quick_tun()
+mlvpn_tunnel_t *best_quick_tun(mlvpn_tunnel_t *not)
 {
   mlvpn_tunnel_t *t, *best=NULL;
   LIST_FOREACH(t, &rtuns, entries) {
     if (t->status == MLVPN_AUTHOK &&
+        t!=not &&
         (!best || t->srtt < best->srtt)) best=t;
   }
   return best;
@@ -1331,7 +1330,7 @@ static void
 mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn)
 {
     mlvpn_pkt_t *pkt;
-    mlvpn_tunnel_t *t=best_quick_tun();
+    mlvpn_tunnel_t *t=best_quick_tun(loss_tun);
     if (!t) return;
     if (mlvpn_cb_is_full(t->hpsbuf))
         log_warnx("net", "%s high priority buffer: overflow", t->name);
@@ -1365,7 +1364,7 @@ mlvpn_rtun_resend(struct resend_data *d)
   if (loss_tun && loss_tun->old_pkts_n[d->seqn % PKTBUFSIZE] == d->seqn) {
     mlvpn_pkt_t *old_pkt=loss_tun->old_pkts[d->seqn % PKTBUFSIZE];
     if (old_pkt->reorder) { // refuse to resend UDP packets!
-      mlvpn_tunnel_t *t=best_quick_tun();
+      mlvpn_tunnel_t *t=best_quick_tun(loss_tun);
       if (t) {
         if (mlvpn_cb_is_full(t->hpsbuf))
           log_warnx("net", "%s high priority buffer: overflow", t->name);
@@ -1381,7 +1380,6 @@ mlvpn_rtun_resend(struct resend_data *d)
     log_debug("resend", "unable to resend seq %lu",d->seqn);
   }
 }
-
 
 static void
 mlvpn_rtun_tick_connect(mlvpn_tunnel_t *t)
@@ -1593,33 +1591,6 @@ mlvpn_rtun_check_timeout(EV_P_ ev_timer *w, int revents)
     mlvpn_rtun_check_lossy(t);
 }
 
-static void
-mlvpn_rtun_adjust_reorder_timeout(EV_P_ ev_timer *w, int revents)
-{
-    mlvpn_tunnel_t *t;
-    double max_srtt = 0.0;
-    double tmp;
-
-    LIST_FOREACH(t, &rtuns, entries)
-    {
-        if (t->status >= MLVPN_AUTHOK) {
-           /* We don't want to monitor fallback only links inside the
-            * reorder timeout algorithm
-            */
-            if (!t->fallback_only) {
-              tmp = t->srtt;
-              max_srtt = max_srtt > tmp ? max_srtt : tmp;
-            }
-        }
-    }
-
-    if (max_srtt > 0) {
-        /* factor applied within reorder unit to get a window */
-        mlvpn_reorder_adjust_timeout(max_srtt);
-    } else {
-        mlvpn_reorder_adjust_timeout(800); /* Conservative 800ms shot */
-    }
-}
 
 static void
 tuntap_io_event(EV_P_ ev_io *w, int revents)
@@ -1896,10 +1867,6 @@ main(int argc, char **argv)
     ev_io_set(&tuntap.io_read, tuntap.fd, EV_READ);
     ev_io_set(&tuntap.io_write, tuntap.fd, EV_WRITE);
     ev_io_start(loop, &tuntap.io_read);
-
-    ev_timer_init(&reorder_adjust_rtt_timeout,
-        mlvpn_rtun_adjust_reorder_timeout, 0., 1.0);
-    ev_timer_start(EV_A_ &reorder_adjust_rtt_timeout);
 
     priv_set_running_state();
 
