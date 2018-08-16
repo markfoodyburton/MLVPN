@@ -722,7 +722,7 @@ mlvpn_rtun_write(EV_P_ ev_io *w, int revents)
 
 mlvpn_tunnel_t *
 mlvpn_rtun_new(const char *name,
-               const char *bindaddr, const char *bindport, uint32_t bindfib,
+               const char *bindaddr, const char *bindport, const char *binddev, uint32_t bindfib,
                const char *destaddr, const char *destport,
                int server_mode, uint32_t timeout,
                int fallback_only, uint32_t bandwidth_max,
@@ -804,6 +804,9 @@ mlvpn_rtun_new(const char *name,
     if (bindport)
         strlcpy(new->bindport, bindport, sizeof(new->bindport));
     new->bindfib = bindfib;
+    if (binddev) {
+        strlcpy(new->binddev, binddev, sizeof(new->binddev));
+    }
     if (destaddr)
         strlcpy(new->destaddr, destaddr, sizeof(new->destaddr));
     if (destport)
@@ -966,6 +969,8 @@ static int
 mlvpn_rtun_bind(mlvpn_tunnel_t *t)
 {
     struct addrinfo hints, *res;
+    struct ifreq ifr;
+    char bindifstr[MLVPN_IFNAMSIZ+5];
     int n, fd;
 
     memset(&hints, 0, sizeof(hints));
@@ -979,23 +984,41 @@ mlvpn_rtun_bind(mlvpn_tunnel_t *t)
     fd = t->fd;
     hints.ai_socktype = SOCK_DGRAM;
 
-    n = priv_getaddrinfo(t->bindaddr, t->bindport, &res, &hints);
-    if (n < 0)
-    {
+    if (*t->bindaddr) {
+      n = priv_getaddrinfo(t->bindaddr, t->bindport, &res, &hints);
+      if (n < 0)
+      {
         log_warnx(NULL, "%s getaddrinfo error: %s", t->name, gai_strerror(n));
         return -1;
+      }
     }
 
     /* Try open socket with each address getaddrinfo returned,
        until getting a valid listening socket. */
-    log_info(NULL, "%s bind to %s", t->name, *t->bindaddr ? t->bindaddr : "any");
-    n = bind(fd, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-    if (n < 0)
-    {
+    memset(bindifstr, 0, sizeof(bindifstr));
+    if (*t->binddev) {
+      snprintf(bindifstr, sizeof(bindifstr) - 1, " on %s", t->binddev);
+    }
+    log_info(NULL, "%s bind to %s%s",
+             t->name, t->bindaddr ? t->bindaddr : "any",
+             bindifstr);
+    if (*t->binddev) {
+      memset(&ifr, 0, sizeof(ifr));
+      snprintf(ifr.ifr_name, sizeof(ifr.ifr_name) - 1, t->binddev);
+      if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, (void *)&ifr, sizeof(ifr)) < 0) {
+        log_warn(NULL, "failed to bind on interface %s", t->binddev);
+      }
+    }
+    if (*t->bindaddr) {
+      n = bind(fd, res->ai_addr, res->ai_addrlen);
+      freeaddrinfo(res);
+      if (n < 0)
+      {
         log_warn(NULL, "%s bind error", t->name);
         return -1;
+      }
     }
+
     return 0;
 }
 
@@ -1072,7 +1095,7 @@ mlvpn_rtun_start(mlvpn_tunnel_t *t)
         log_warn(NULL, "%s setsockopt SO_REUSEADDR failed", t->name);
         goto error;
     }
-    if (*t->bindaddr) {
+    if (*t->bindaddr || *t->binddev) {
         if (mlvpn_rtun_bind(t) < 0) {
             goto error;
         }
@@ -1838,8 +1861,6 @@ main(int argc, char **argv)
 
     LIST_INIT(&rtuns);
 
-    mlvpn_reorder_init();
-
     /* Kill me if my root process dies ! */
 #ifdef HAVE_LINUX
     prctl(PR_SET_PDEATHSIG, SIGCHLD);
@@ -1851,6 +1872,11 @@ main(int argc, char **argv)
         fatalx("cannot open config file");
     if (! (loop = ev_default_loop(EVFLAG_AUTO)))
         fatal(NULL, "cannot initialize libev. check LIBEV_FLAGS?");
+
+    /* init the reorder buffer after ev is enabled, but before we have all the
+       tunnels */
+    mlvpn_reorder_init();
+
     /* tun/tap initialization */
     mlvpn_tuntap_init();
     if (mlvpn_config(config_fd, 1) != 0)

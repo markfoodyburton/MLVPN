@@ -137,6 +137,7 @@ typedef struct mlvpn_tunnel_s
     char *name;           /* tunnel name */
     char bindaddr[MLVPN_MAXHNAMSTR]; /* packets source */
     char bindport[MLVPN_MAXPORTSTR]; /* packets port source (or NULL) */
+    char binddev[MLVPN_IFNAMSIZ];    /* bind to specific device */
     uint32_t bindfib;     /* FIB number to use */
     char destaddr[MLVPN_MAXHNAMSTR]; /* remote server ip (can be hostname) */
     char destport[MLVPN_MAXPORTSTR]; /* remote server port */
@@ -222,7 +223,7 @@ void mlvpn_rtun_set_weight(mlvpn_tunnel_t *t, double weight);
 mlvpn_tunnel_t *mlvpn_rtun_wrr_choose();
 mlvpn_tunnel_t *mlvpn_rtun_choose(uint32_t len);
 mlvpn_tunnel_t *mlvpn_rtun_new(const char *name,
-    const char *bindaddr, const char *bindport, uint32_t bindfib,
+    const char *bindaddr, const char *bindport, const char *binddev, uint32_t bindfib,
     const char *destaddr, const char *destport,
     int server_mode, uint32_t timeout,
     int fallback_only, uint32_t bandwidth,

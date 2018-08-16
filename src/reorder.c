@@ -127,8 +127,10 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
       /* We don't want to monitor fallback only links inside the
        * reorder timeout algorithm
        */
-      max_srtt+= t->srtt_av;
-      ts++;
+      if (t->srtt_av > 0 && t->srtt_av < 1000) {
+        max_srtt+= t->srtt_av;
+        ts++;
+      }
 //      if (!t->fallback_only) {
 //        tmp = t->srtt_av;
 //        max_srtt = max_srtt > tmp ? max_srtt : tmp;
@@ -160,7 +162,7 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
      (NB srtt in seconds (e.g. /1000).
      only problme - we dont know what the incomming bandwidth is !
 */
-  b->ideal_len=((b->ideal_len*3.0)+((double)b->inboundpps*max_srtt*2.0)/1000.0)/4.0;
+  b->ideal_len=((b->ideal_len*3.0)+((double)b->inboundpps*(max_srtt/1000.0)*2.0))/4.0;
   
 //  printf("Ideal %f\n",b->ideal_len);
 }
@@ -172,10 +174,10 @@ void mlvpn_reorder_init()
   TAILQ_INIT(&reorder_buffer->pool);
   TAILQ_INIT(&reorder_buffer->list);
   reorder_drain_timeout.repeat = 0.8;
+  mlvpn_reorder_reset();
   ev_init(&reorder_drain_timeout, &mlvpn_reorder_drain_timeout);
   ev_timer_init(&reorder_timeout_tick, &mlvpn_reorder_tick, 0., 1.0);
-//  ev_timer_start(EV_A_ &reorder_timeout_tick);
-  mlvpn_reorder_reset();
+  ev_timer_start(EV_A_ &reorder_timeout_tick);
 }
 
 //called from main, or from config
@@ -194,12 +196,11 @@ mlvpn_reorder_reset()
   b->enabled=0;
   b->inboundpps=0;
   b->inboundpkts=0;
+  b->ideal_len = 0;
 }
 
 void mlvpn_reorder_enable()
 {
-  reorder_drain_timeout.repeat = 0.8;
-  ev_timer_start(EV_A_ &reorder_timeout_tick);
   reorder_buffer->enabled=1;
 }
 
