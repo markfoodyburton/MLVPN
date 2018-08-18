@@ -299,11 +299,6 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
 
     tun->seq_last = seq;
 
-    if (tun->seq_vect==(uint64_t)-1  /* !tun->loss*/) {
-      if (tun->reorder_length > tun->reorder_length_preset) {
-        tun->reorder_length--;
-      }
-    }
   } else if (seq >= tun->seq_last - 63) {
     if ((tun->seq_vect & (1 << (tun->seq_last - seq)))==0) {
       tun->seq_vect |= (1 << (tun->seq_last - seq));
@@ -312,6 +307,7 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
     int d=(tun->seq_last - seq)+1;
     if (tun->reorder_length < (tun->seq_last - seq)) {
       log_debug("loss","Erronious loss %s, found %lu, %d behind reorder length (new RL %d)",tun->name, seq, d-tun->reorder_length,d);
+      if (tun->loss_event > 0) tun->loss_event--;
     }
     if (d>63) d=63;
     if (tun->reorder_length <= d) {
@@ -812,7 +808,10 @@ mlvpn_rtun_new(const char *name,
     if (destport)
         strlcpy(new->destport, destport, sizeof(new->destport));
     new->sbuf = mlvpn_pktbuffer_init(PKTBUFSIZE);
-    new->hpsbuf = mlvpn_pktbuffer_init(PKTBUFSIZE);
+    new->hpsbuf = mlvpn_pktbuffer_init(PKTBUFSIZE/8); // no point having a large
+                                                      // HS buffer, if you
+                                                      // overflow, then you are
+                                                      // overloading the hs path.
     mlvpn_rtun_tick(new);
     new->timeout = timeout;
     new->next_keepalive = 0;
@@ -1196,6 +1195,8 @@ mlvpn_rtun_status_up(mlvpn_tunnel_t *t)
     t->srtt_av_d=0;
     t->srtt_av_c=0;
     t->loss_av=0;
+    mlvpn_pktbuffer_reset(t->sbuf);
+    mlvpn_pktbuffer_reset(t->hpsbuf);
     mlvpn_update_status();
     mlvpn_rtun_wrr_reset(&rtuns, mlvpn_status.fallback_mode);
     mlvpn_script_get_env(&env_len, &env);
@@ -1505,6 +1506,13 @@ void mlvpn_calc_bandwidth(uint32_t len)
           t->bandwidth*=0.95;
         }
       }
+
+      if (t->seq_vect==(uint64_t)-1  /* !t->loss*/) {
+        if (t->reorder_length > t->reorder_length_preset) {
+          t->reorder_length--;
+        }
+      }
+
     }
     mlvpn_rtun_recalc_weight();
   }
