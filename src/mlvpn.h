@@ -187,7 +187,7 @@ typedef struct mlvpn_tunnel_s
     uint32_t bandwidth;   /* current bandwidth in bytes per second */
     uint32_t bandwidth_measured;
     uint32_t bm_data;
-    ev_tstamp bm_timestamp;
+    uint32_t bandwidth_out;
 //    uint32_t bandwidth_asked;
     circular_buffer_t *sbuf;    /* send buffer */
     circular_buffer_t *hpsbuf;  /* high priority buffer */

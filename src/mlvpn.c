@@ -361,6 +361,7 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
 
         tun->recvbytes += len;
         tun->recvpackets += 1;
+        tun->bm_data += len;
         if (tun->quota) {
           if (tun->permitted > (len + 46)) {
             tun->permitted -= (len + 46 /*UDP over Ethernet overhead*/);
@@ -414,6 +415,11 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
             if (tun->last_keepalive_ack_sent + MLVPN_IO_TIMEOUT_DEFAULT < tun->last_keepalive_ack) {
                 tun->last_keepalive_ack_sent = tun->last_keepalive_ack;
                 mlvpn_rtun_send_keepalive(tun->last_keepalive_ack, tun);
+            }
+            uint32_t bw=0;
+            sscanf(decap_pkt.data,"%u", &bw);
+            if (bw>0) {
+              tun->bandwidth_out=bw;
             }
         } else if (decap_pkt.type == MLVPN_PKT_DISCONNECT &&
                 tun->status >= MLVPN_AUTHOK) {
@@ -682,7 +688,6 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
             tun->permitted = 0;
           }
         }
-        tun->bm_data += ret;
 
         if (wlen != ret)
         {
@@ -792,7 +797,6 @@ mlvpn_rtun_new(const char *name,
     new->bandwidth = bandwidth_max;
     new->bandwidth_measured=0;
     new->bm_data=0;
-    new->bm_timestamp=0;
     new->fallback_only = fallback_only;
     new->loss_tolerence = loss_tolerence;
     if (bindaddr)
@@ -1482,7 +1486,7 @@ void mlvpn_calc_bandwidth(uint32_t len)
       t->loss_cnt=0;
 
       // Hunt a low water mark - ONLY when traffic is low - allow SLOW drift
-      if (t->srtt_av > 0 && t->bandwidth_measured < t->bandwidth_max/5 ) {
+      if (t->srtt_av > 0 && t->bandwidth_out < t->bandwidth_max/5 ) {
         if (t->srtt_av < t->srtt_min) {
           t->srtt_min = t->srtt_av;
         } else {
@@ -1493,8 +1497,8 @@ void mlvpn_calc_bandwidth(uint32_t len)
       double target=t->srtt_target>0?t->srtt_target:t->srtt_min*1.25;
       // hunt a high watermark with slow drift
       if (t->srtt_av < target) {
-        if (t->bandwidth_measured>t->bandwidth_max) {
-          t->bandwidth_max=t->bandwidth_measured;
+        if (t->bandwidth_out>t->bandwidth_max) {
+          t->bandwidth_max=t->bandwidth_out;
           // we could 'drift' the target here...
         }
       } else {
@@ -1541,6 +1545,7 @@ mlvpn_rtun_send_keepalive(ev_tstamp now, mlvpn_tunnel_t *t)
         log_debug("protocol", "%s sending keepalive", t->name);
         pkt = mlvpn_pktbuffer_write(t->hpsbuf);
         pkt->type = MLVPN_PKT_KEEPALIVE;
+        pkt->len=sprintf(pkt->data,"%u",t->bandwidth_measured) + 1;
     }
     t->next_keepalive = NEXT_KEEPALIVE(now, t);
 }
