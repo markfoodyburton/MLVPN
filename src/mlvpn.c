@@ -1195,8 +1195,8 @@ mlvpn_rtun_status_up(mlvpn_tunnel_t *t)
     t->srtt_av_d=0;
     t->srtt_av_c=0;
     t->loss_av=0;
-    mlvpn_pktbuffer_reset(t->sbuf);
-    mlvpn_pktbuffer_reset(t->hpsbuf);
+//    mlvpn_pktbuffer_reset(t->sbuf);
+//    mlvpn_pktbuffer_reset(t->hpsbuf);
     mlvpn_update_status();
     mlvpn_rtun_wrr_reset(&rtuns, mlvpn_status.fallback_mode);
     mlvpn_script_get_env(&env_len, &env);
@@ -1304,6 +1304,10 @@ mlvpn_rtun_send_auth(mlvpn_tunnel_t *t)
         /* server side */
         if (t->status == MLVPN_DISCONNECTED || t->status >= MLVPN_AUTHOK)
         {
+            mlvpn_rtun_tick(t);
+            mlvpn_rtun_status_up(t); // mark this as up, before trying to send
+                                     // somethign on it !
+
             if (mlvpn_cb_is_full(t->hpsbuf)) {
                 log_warnx("net", "%s high priority buffer: overflow", t->name);
                 mlvpn_cb_reset(t->hpsbuf);
@@ -1323,8 +1327,8 @@ mlvpn_rtun_send_auth(mlvpn_tunnel_t *t)
                 t->status = MLVPN_AUTHSENT;
             log_debug("protocol", "%s sending 'OK'", t->name);
             log_info("protocol", "%s authenticated", t->name);
-            mlvpn_rtun_tick(t);
-            mlvpn_rtun_status_up(t);
+//            mlvpn_rtun_tick(t);
+//            mlvpn_rtun_status_up(t);
             if (!ev_is_active(&t->io_write)) {
                 ev_io_start(EV_A_ &t->io_write);
             }
