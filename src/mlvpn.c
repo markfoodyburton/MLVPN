@@ -1472,12 +1472,15 @@ void mlvpn_calc_bandwidth(uint32_t len)
       t->bandwidth_measured=((((double)(t->bm_data)*8) / diff))/1000; // kbits/sec
       t->bm_data=0;
 
+      double current_loss=0;
       if (t->loss_cnt) {
 //        t->loss_av=t->loss_event/diff;
-        t->loss_av=((t->loss_av*3.0) + (t->loss_event * 100.0/ t->loss_cnt))/4.0; // percent
+        current_loss=(t->loss_event * 100.0)/ t->loss_cnt;
+        t->loss_av=((t->loss_av*3.0) + current_loss)/4.0; // percent
       } else {
         if (t->loss_event || t->status!=MLVPN_AUTHOK) {
           t->loss_av=100.0;
+          current_loss=100.0;
         } else {
           t->loss_av=0;
         }
@@ -1494,24 +1497,31 @@ void mlvpn_calc_bandwidth(uint32_t len)
         }
       }
       
-      double target=t->srtt_target>0?t->srtt_target:t->srtt_min*1.25;
+//      double target=t->srtt_target>0?t->srtt_target:t->srtt_min*1.25;
       // hunt a high watermark with slow drift
-      if (t->srtt_av < target) {
+//      if (t->srtt_av < target) {
+      if (current_loss == 0) {
         if (t->bandwidth_out>t->bandwidth_max) {
           t->bandwidth_max=t->bandwidth_out;
           // we could 'drift' the target here...
         }
-      } else {
-        if (t->bandwidth*2 < t->bandwidth_max && t->bandwidth_max > 10) {
-          t->bandwidth_max *= 0.95;
-        }
+//      } else {
+//        if (t->bandwidth*2 < t->bandwidth_max && t->bandwidth_max > 10) {
+//          t->bandwidth_max *= 0.95;
+//        }
       }
 
-      if (t->srtt_av < target*0.9 && t->bandwidth < t->bandwidth_max) {
-        t->bandwidth*=1.05;
+//      if (t->srtt_av < target*0.9 && t->bandwidth < t->bandwidth_max) {
+      if (current_loss==0) {
+        if (t->bandwidth < t->bandwidth_max) {
+          t->bandwidth*=1.05;
+        }
       } else {
-        if (t->srtt_av > target*1.1 && t->bandwidth > (t->bandwidth_max/4)) {
-          t->bandwidth*=0.95;
+        if (/*t->srtt_av > target*1.1 &&*/ t->bandwidth_out > (t->bandwidth_max/4)) {
+          t->bandwidth=(t->bandwidth*9 + t->bandwidth_out)/10;
+          if (t->bandwidth_max > 100) {
+            t->bandwidth_max=(t->bandwidth_max*9 + t->bandwidth)/10;
+          }
         }
       }
 

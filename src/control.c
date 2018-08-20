@@ -437,7 +437,7 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl)
                        t->recvpackets,
                        t->sentbytes,
                        t->recvbytes,
-                       t->bandwidth_out,
+                       t->bandwidth,
                        t->srtt_av,
                        t->loss_av,
                        t->sent_loss,
