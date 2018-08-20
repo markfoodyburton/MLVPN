@@ -269,6 +269,15 @@ void mlvpn_rtun_inject_tuntap(mlvpn_pkt_t *pkt)
     }
 }
 
+
+#if 0
+/*
+remove ->loss, as we dont use it - it's a sort of 'average' thing.
+make ->loss be the current loss
+maybe remove _av, as I think we should base on the current loss alone....
+*/
+#endif
+
 /* Count the loss on the last 64 packets */
 static void
 mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
@@ -1353,6 +1362,7 @@ mlvpn_tunnel_t *best_quick_tun(mlvpn_tunnel_t *not)
   LIST_FOREACH(t, &rtuns, entries) {
     if (t->status == MLVPN_AUTHOK &&
         t!=not &&
+        t->sent_loss==0 &&
         (!best || t->srtt < best->srtt)) best=t;
   }
   return best;
@@ -1500,7 +1510,7 @@ void mlvpn_calc_bandwidth(uint32_t len)
 //      double target=t->srtt_target>0?t->srtt_target:t->srtt_min*1.25;
       // hunt a high watermark with slow drift
 //      if (t->srtt_av < target) {
-      if (current_loss == 0) {
+      if (t->sent_loss == 0) {
         if (t->bandwidth_out>t->bandwidth_max) {
           t->bandwidth_max=t->bandwidth_out;
           // we could 'drift' the target here...
@@ -1512,7 +1522,7 @@ void mlvpn_calc_bandwidth(uint32_t len)
       }
 
 //      if (t->srtt_av < target*0.9 && t->bandwidth < t->bandwidth_max) {
-      if (current_loss==0) {
+      if (t->sent_loss==0) {
         if (t->bandwidth < t->bandwidth_max) {
           t->bandwidth*=1.05;
         }
@@ -1624,6 +1634,9 @@ mlvpn_rtun_check_timeout(EV_P_ ev_timer *w, int revents)
 {
     mlvpn_tunnel_t *t = w->data;
     ev_tstamp now = ev_now(EV_DEFAULT_UC);
+
+    mlvpn_rtun_check_lossy(t);
+
     if (t->status >= MLVPN_AUTHOK && t->timeout > 0) {
       if ((t->last_keepalive_ack != 0) && (t->last_keepalive_ack + t->timeout + MLVPN_IO_TIMEOUT_DEFAULT + ((t->srtt_av/1000.0)*2)) < now) {
             log_info("protocol", "%s timeout", t->name);
@@ -1632,13 +1645,13 @@ mlvpn_rtun_check_timeout(EV_P_ ev_timer *w, int revents)
             if (now > t->next_keepalive)
                 mlvpn_rtun_send_keepalive(now, t);
         }
-    } else if (t->status < MLVPN_AUTHOK) {
+    }
+    if (t->status < MLVPN_AUTHOK) {
         mlvpn_rtun_tick_connect(t);
     }
     if (!ev_is_active(&t->io_write) && ! mlvpn_cb_is_empty(t->hpsbuf)) {
         ev_io_start(EV_A_ &t->io_write);
     }
-    mlvpn_rtun_check_lossy(t);
 }
 
 
