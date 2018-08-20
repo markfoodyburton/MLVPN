@@ -275,6 +275,8 @@ void mlvpn_rtun_inject_tuntap(mlvpn_pkt_t *pkt)
 remove ->loss, as we dont use it - it's a sort of 'average' thing.
 make ->loss be the current loss
 maybe remove _av, as I think we should base on the current loss alone....
+
+do we need srtt_min, srtt_av, ...
 */
 #endif
 
@@ -299,6 +301,8 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
         log_debug("loss","%s lost %lu new seq %lu last seq %lu vector: %lx (reorder length: %d)",tun->name, tun->seq_last+i-(tun->reorder_length+1), seq, tun->seq_last, tun->seq_vect, tun->reorder_length);
         mlvpn_rtun_request_resend(tun, tun->seq_last+i-(tun->reorder_length+1));
         tun->loss_event++;
+        tun->loss_cnt++; // inc the counter, _cnt shoudl be a count of all
+                         // 'possible' pkt's
       }
       tun->seq_vect<<=1;
       tun->loss++;
@@ -370,7 +374,7 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
 
         tun->recvbytes += len;
         tun->recvpackets += 1;
-        tun->bm_data += len;
+        tun->bm_data += decap_pkt.len;
         if (tun->quota) {
           if (tun->permitted > (len + 46)) {
             tun->permitted -= (len + 46 /*UDP over Ethernet overhead*/);
@@ -1014,6 +1018,11 @@ mlvpn_rtun_bind(mlvpn_tunnel_t *t)
     log_info(NULL, "%s bind to %s%s",
              t->name, t->bindaddr ? t->bindaddr : "any",
              bindifstr);
+
+#if 0
+    /* this doesn't work ??? Or maybe???*/
+    /* SHould revert to my earlier version */
+#endif
     if (*t->binddev) {
       memset(&ifr, 0, sizeof(ifr));
       snprintf(ifr.ifr_name, sizeof(ifr.ifr_name) - 1, t->binddev);
@@ -1208,6 +1217,7 @@ mlvpn_rtun_status_up(mlvpn_tunnel_t *t)
     t->srtt_av_d=0;
     t->srtt_av_c=0;
     t->loss_av=0;
+    t->bm_data=0;
 //    mlvpn_pktbuffer_reset(t->sbuf);
 //    mlvpn_pktbuffer_reset(t->hpsbuf);
     mlvpn_update_status();
@@ -1486,7 +1496,7 @@ void mlvpn_calc_bandwidth(uint32_t len)
       if (t->loss_cnt) {
 //        t->loss_av=t->loss_event/diff;
         current_loss=(t->loss_event * 100.0)/ t->loss_cnt;
-        t->loss_av=((t->loss_av*3.0) + current_loss)/4.0; // percent
+        t->loss_av=current_loss;//((t->loss_av*3.0) + current_loss)/4.0; // percent
       } else {
         if (t->loss_event || t->status!=MLVPN_AUTHOK) {
           t->loss_av=100.0;
@@ -1528,7 +1538,7 @@ void mlvpn_calc_bandwidth(uint32_t len)
         }
       } else {
         if (/*t->srtt_av > target*1.1 &&*/ t->bandwidth_out > (t->bandwidth_max/4)) {
-          t->bandwidth=(t->bandwidth*9 + t->bandwidth_out)/10;
+          t->bandwidth=t->bandwidth_out * 0.8;//(t->bandwidth*9 + t->bandwidth_out)/10;
           if (t->bandwidth_max > 100) {
             t->bandwidth_max=(t->bandwidth_max*9 + t->bandwidth)/10;
           }

@@ -304,7 +304,7 @@ mlvpn_config(int config_file_fd, int first_time)
                         "No remote port specified.\n", 1);
                 }
 
-//                bindaddr=ip_from_if(bindaddr);
+                bindaddr=ip_from_if(bindaddr);
                 
                 
                 _conf_set_str_from_conf(
