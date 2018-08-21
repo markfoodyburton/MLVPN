@@ -63,11 +63,9 @@ struct mlvpn_reorder_buffer {
   int is_initialized;
   int enabled;
   int list_size;
-  int list_size_max;
+  int list_size_max;  // used to report only
   uint64_t loss;
   uint64_t delivered;
-  uint64_t inboundpps;
-  uint64_t inboundpkts;
 
   TAILQ_HEAD(list_t, pkttailq) list, pool;
 };
@@ -137,11 +135,6 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
   reorder_drain_timeout.repeat = (max_srtt*6.2)/1000.0;//2.2;// ((reorder_drain_timeout.repeat*9)+ t)/10;
   log_debug("reorder", "adjusting reordering drain timeout to %.0fms", reorder_drain_timeout.repeat*1000 );
 
-  struct mlvpn_reorder_buffer *b=reorder_buffer;
-
-  b->inboundpps=b->inboundpkts  /*/we are called each second, so nothing to
-                                 * divide by*/;
-  b->inboundpkts=0;
 }
 
 // Called once from main.
@@ -171,8 +164,6 @@ mlvpn_reorder_reset()
   b->list_size_max=0;
   b->is_initialized=0;
   b->enabled=0;
-  b->inboundpps=0;
-  b->inboundpkts=0;
 }
 
 void mlvpn_reorder_enable()
@@ -184,7 +175,7 @@ void mlvpn_reorder_enable()
 void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
 {
   struct mlvpn_reorder_buffer *b=reorder_buffer;
-  b->inboundpkts++;
+
   if (pkt->type == MLVPN_PKT_DATA_RESEND) {
     if ((int64_t)(b->min_seqn - pkt->seq) > 0) {
       log_debug("resend","Rejecting (un-necissary ?) resend %lu",pkt->seq);
