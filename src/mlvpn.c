@@ -288,14 +288,9 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
     /* consider a connection reset. */
     tun->seq_vect = (uint64_t) -1;
     tun->seq_last = seq;
-    tun->loss = 0;
   } else if (seq > tun->seq_last) {
     /* new sequence number -- recent message arrive */
     for (int i=0;i<seq-tun->seq_last;i++) {
-      if ((tun->seq_vect & (1ul<<63))==0) {
-        tun->loss--; // We're nolonger counting that loss it happend some time
-                     // ago (or the re-order is HUGE!
-      }
       if ((tun->seq_vect & (1ul<<(tun->reorder_length+1)))==0) {
         log_debug("loss","%s lost %lu new seq %lu last seq %lu vector: %lx (reorder length: %d)",tun->name, tun->seq_last+i-(tun->reorder_length+1), seq, tun->seq_last, tun->seq_vect, tun->reorder_length);
         mlvpn_rtun_request_resend(tun, tun->seq_last+i-(tun->reorder_length+1));
@@ -304,17 +299,14 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
                          // 'possible' pkt's
       }
       tun->seq_vect<<=1;
-      tun->loss++;
     }
     tun->seq_vect |= 1;
-    tun->loss--;
 
     tun->seq_last = seq;
 
   } else if (seq >= tun->seq_last - 63) {
     if ((tun->seq_vect & (1 << (tun->seq_last - seq)))==0) {
       tun->seq_vect |= (1 << (tun->seq_last - seq));
-      tun->loss--;
     }
     int d=(tun->seq_last - seq)+1;
     if (tun->reorder_length < (tun->seq_last - seq)) {
@@ -332,7 +324,6 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
     /* consider a wrap round. */
     tun->seq_vect = (uint64_t) -1;
     tun->seq_last = seq;
-    tun->loss = 0;
   }
 }
 
@@ -550,9 +541,9 @@ mlvpn_protocol_read(
     if (proto.timestamp_reply != (uint16_t)-1) {
         uint16_t now16 = mlvpn_timestamp16(now64);
         double R = mlvpn_timestamp16_diff(now16, proto.timestamp_reply);
-        if ((R < 5000) && (tun->loss==0)) { /* ignore large values, e.g. server
-                                             * was Ctrl-Zed, and while there
-                                             * are losses, the values will be wrong! */
+                  if ((R < 5000) && (tun->seq_vect==(uint64_t)-1)) {  /* ignore large values, e.g. server
+                                                                       * was Ctrl-Zed, and while there
+                                                                       * are losses, the values will be wrong! */
             tun->srtt_raw=R;
             if (tun->rtt_hit<10) { /* first measurement */
               tun->srtt = 40;//R;
@@ -622,10 +613,8 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
     proto.version = MLVPN_PROTOCOL_VERSION;
     proto.reorder = pkt->reorder;
     proto.sent_loss=mlvpn_loss_pack(tun);
-//    if (tun->loss_av>0)
-//      printf("%s %d %f\n",tun->name,proto.sent_loss, tun->loss_av);
 
-    #ifdef ENABLE_CRYPTO
+#ifdef ENABLE_CRYPTO
     if (mlvpn_options.cleartext_data && (pkt->type == MLVPN_PKT_DATA || pkt->type == MLVPN_PKT_DATA_RESEND)) {
         memcpy(&proto.data, &pkt->data, pkt->len);
     } else {
@@ -792,7 +781,6 @@ mlvpn_rtun_new(const char *name,
     new->rtt_hit = 0;
     new->seq_last = 0;
     new->seq_vect = (uint64_t) -1;
-    new->loss = 0;
     new->loss_cnt=0;
     new->loss_event=0;
     new->loss_av=0;
@@ -1487,15 +1475,12 @@ void mlvpn_calc_bandwidth(uint32_t len)
       t->bandwidth_measured=((((double)(t->bm_data)*8) / diff))/1000; // kbits/sec
       t->bm_data=0;
 
-      double current_loss=0;
       if (t->loss_cnt) {
-//        t->loss_av=t->loss_event/diff;
-        current_loss=(t->loss_event * 100.0)/ t->loss_cnt;
-        t->loss_av=current_loss;//((t->loss_av*3.0) + current_loss)/4.0; // percent
+        double current_loss=(t->loss_event * 100.0)/ t->loss_cnt;
+        t->loss_av=current_loss;
       } else {
         if (t->loss_event || t->status!=MLVPN_AUTHOK) {
           t->loss_av=100.0;
-          current_loss=100.0;
         } else {
           t->loss_av=0;
         }

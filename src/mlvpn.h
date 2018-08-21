@@ -150,11 +150,10 @@ typedef struct mlvpn_tunnel_s
     int fallback_only;    /* if set, this link will be used when all others are down */
     uint32_t loss_tolerence; /* How much loss is acceptable before the link is
                               * discarded */
-    uint16_t loss;        /* our loss */
     double sent_loss;   /* loss as reported by far end */
     uint64_t loss_cnt;
     uint64_t loss_event;
-    double loss_av;
+    double loss_av;    /* our average loss */
     uint64_t seq;
 //    uint64_t expected_receiver_seq;
     uint64_t saved_timestamp;
