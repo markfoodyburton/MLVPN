@@ -53,6 +53,9 @@ int
 mlvpn_cb_is_full(const circular_buffer_t *buf);
 
 int
+mlvpn_cb_length(const circular_buffer_t *buf);
+
+int
 mlvpn_cb_is_empty(const circular_buffer_t *buf);
 
 void *

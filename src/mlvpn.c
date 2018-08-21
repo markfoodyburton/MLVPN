@@ -825,10 +825,7 @@ mlvpn_rtun_new(const char *name,
     if (destport)
         strlcpy(new->destport, destport, sizeof(new->destport));
     new->sbuf = mlvpn_pktbuffer_init(PKTBUFSIZE);
-    new->hpsbuf = mlvpn_pktbuffer_init(PKTBUFSIZE/8); // no point having a large
-                                                      // HS buffer, if you
-                                                      // overflow, then you are
-                                                      // overloading the hs path.
+    new->hpsbuf = mlvpn_pktbuffer_init(PKTBUFSIZE);
     mlvpn_rtun_tick(new);
     new->timeout = timeout;
     new->next_keepalive = 0;
@@ -1373,7 +1370,8 @@ mlvpn_tunnel_t *best_quick_tun(mlvpn_tunnel_t *not)
     if (t->status == MLVPN_AUTHOK &&
         t!=not &&
         t->sent_loss==0 &&
-        (!best || t->srtt < best->srtt)) best=t;
+        (!best || mlvpn_cb_length(t->hpsbuf) < mlvpn_cb_length(best->hpsbuf)))
+      best=t;
   }
   return best;
 }

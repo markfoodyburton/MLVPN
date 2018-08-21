@@ -142,7 +142,7 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
   }
 
 
-  reorder_drain_timeout.repeat = (max_srtt*2.2)/1000.0;//2.2;// ((reorder_drain_timeout.repeat*9)+ t)/10;
+  reorder_drain_timeout.repeat = (max_srtt*6.2)/1000.0;//2.2;// ((reorder_drain_timeout.repeat*9)+ t)/10;
   log_debug("reorder", "adjusting reordering drain timeout to %.0fms", reorder_drain_timeout.repeat*1000 );
 //  printf("rtt %f\n", reorder_drain_timeout.repeat);
 
@@ -212,8 +212,9 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
     } else {
       log_debug("resend","Injecting resent %lu",pkt->seq);
     }
-  }
-  if (!b->enabled || !pkt->reorder || !pkt->seq || pkt->seq==b->min_seqn)
+  } else if (!b->enabled || !pkt->reorder || !pkt->seq || pkt->seq==b->min_seqn)
+    // if this is a resend, it will not be marked as reorderable, so we
+         // must skip fast delivery
   {
     if (pkt->seq==b->min_seqn) {
       log_debug("reorder", "Inject TCP packet Just In Time (seqn %lu)", pkt->seq);
@@ -252,8 +253,6 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
 
   p->timestamp = ev_now(EV_DEFAULT_UC);
 
-
-    
     /*
      * calculate the offset from the head pointer we need to go.
      * The subtraction takes care of the sequence number wrapping.
@@ -285,6 +284,7 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
   if (b->list_size > b->list_size_max) {
     b->list_size_max = b->list_size;
   }
+
 //  if (TAILQ_LAST(&b->list,list_t) && ((int64_t)(b->min_seqn -
 //  TAILQ_LAST(&b->list,list_t)->pkt.seq) > 0)) {
 //  if (((int64_t)(b->min_seqn - p->pkt.seq) > 0)) {
@@ -387,4 +387,3 @@ void mlvpn_reorder_drain()
     ev_timer_again(EV_A_ &reorder_drain_timeout);
   }
 }
-  
