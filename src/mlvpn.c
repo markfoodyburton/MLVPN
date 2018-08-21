@@ -270,15 +270,6 @@ void mlvpn_rtun_inject_tuntap(mlvpn_pkt_t *pkt)
 }
 
 
-#if 0
-/*
-remove ->loss, as we dont use it - it's a sort of 'average' thing.
-make ->loss be the current loss
-maybe remove _av, as I think we should base on the current loss alone....
-
-*/
-#endif
-
 /* Count the loss on the last 64 packets */
 static void
 mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)

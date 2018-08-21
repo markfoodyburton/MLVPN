@@ -68,7 +68,7 @@ struct mlvpn_reorder_buffer {
   uint64_t delivered;
   uint64_t inboundpps;
   uint64_t inboundpkts;
-//  double ideal_len;
+
   TAILQ_HEAD(list_t, pkttailq) list, pool;
 };
 static struct mlvpn_reorder_buffer *reorder_buffer;
@@ -102,16 +102,8 @@ double mlvpn_total_loss()
 void mlvpn_reorder_drain_timeout(EV_P_ ev_timer *w, int revents)
 {
     log_debug("reorder", "reorder timeout. Packet loss?");
-    struct mlvpn_reorder_buffer *b=reorder_buffer;
 
-    if (!TAILQ_EMPTY(&b->list)) {
-//      if (b->min_seqn != TAILQ_LAST(&b->list, list_t)->pkt.seq) {
-////        b->min_seqn=TAILQ_LAST(&b->list, list_t)->pkt.seq; // Jump over any hole !!!!
-////        b->loss++;
-////        printf("Timeout loss\n");
-//      }
-      mlvpn_reorder_drain();
-    }
+    mlvpn_reorder_drain();
 }
 
 void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
@@ -144,23 +136,12 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
 
   reorder_drain_timeout.repeat = (max_srtt*6.2)/1000.0;//2.2;// ((reorder_drain_timeout.repeat*9)+ t)/10;
   log_debug("reorder", "adjusting reordering drain timeout to %.0fms", reorder_drain_timeout.repeat*1000 );
-//  printf("rtt %f\n", reorder_drain_timeout.repeat);
 
   struct mlvpn_reorder_buffer *b=reorder_buffer;
 
-  b->inboundpps=b->inboundpkts/*/we are called each second*/;
+  b->inboundpps=b->inboundpkts  /*/we are called each second, so nothing to
+                                 * divide by*/;
   b->inboundpkts=0;
-
-  /* Ideal size of the reorder buffer is long enough to get a resent back, if we
-   have a loss. So (the bandwidth requested/8) /1500 = number of packets / s
-   so, outstanding packets :   ((bandwidth/8)/1500) * (srtt)
-   e.g inbound packets/s  * srtt
-     (NB srtt in seconds (e.g. /1000).
-     only problme - we dont know what the incomming bandwidth is !
-*/
-//  b->ideal_len=((b->ideal_len*3.0)+((double)b->inboundpps*(max_srtt/1000.0)*2.0))/4.0;
-  
-//  printf("Ideal %f\n",b->ideal_len);
 }
 
 // Called once from main.
@@ -192,7 +173,6 @@ mlvpn_reorder_reset()
   b->enabled=0;
   b->inboundpps=0;
   b->inboundpkts=0;
-//  b->ideal_len = 0;
 }
 
 void mlvpn_reorder_enable()
@@ -285,14 +265,7 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
     b->list_size_max = b->list_size;
   }
 
-//  if (TAILQ_LAST(&b->list,list_t) && ((int64_t)(b->min_seqn -
-//  TAILQ_LAST(&b->list,list_t)->pkt.seq) > 0)) {
-//  if (((int64_t)(b->min_seqn - p->pkt.seq) > 0)) {
-//    log_debug("reorder", "got old insert %d behind (probably fluctuating RTT)\n",(int)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq));
-//    printf("got old insert %d behind (probably fluctuating RTT)\n",(int)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq));
-//  }
-
-  mlvpn_reorder_drain(); // now see what canbe drained off
+  mlvpn_reorder_drain(); // now see what can be drained off
 }
 
 void mlvpn_reorder_drain()
@@ -301,57 +274,20 @@ void mlvpn_reorder_drain()
   unsigned int drain_cnt = 0;
   ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat);
 
-#if 0
-  // If there is no chance of getting a packet (it's older than the latest
-  // packet seen on an ACTIVE  tunnel - the maximum reorder_length),
-  // then consider it lost
-  uint64_t oldest=0;
-  if (b->min_seqn != TAILQ_LAST(&b->list,list_t)->pkt.seq)
-  {
-    mlvpn_tunnel_t *t;
-    mlvpn_tunnel_t *ptun;
-    LIST_FOREACH(t, &rtuns, entries) {
-      if (t->reorder_length
-          && t->status >= MLVPN_AUTHOK
-          &&  (t->last_activity > ev_now(EV_DEFAULT_UC)-3.0)
-// if there has been acivity in the last 3 seconds, we'll assume this tunnel isn't dead.
-// better keep all the tunnels 'active' to make sure that there is traffic on all tunnels, so we can prune better !!!!
-          ) {
-        uint64_t o=(t->last_seen - (t->reorder_length));
-        if (!oldest || ((int64_t)(oldest-o))>=0) {
-          oldest=o;
-          ptun=t;
-        }
-      }
-    }
-
-    if (oldest==0 || (int64_t)(b->min_seqn - oldest)>=0) 
-    {
-      oldest=b->min_seqn;
-    } else {
-      printf("Pruning %lu (from %s reorder %d)\n",oldest - b->min_seqn, ptun->name, ptun->reorder_length);
-    }
-  } else {
-    oldest=b->min_seqn;
-  }
-#endif
 
 /* We should
   deliver all packets in order
     Packets that are 'before' the current 'minium' - drop
     Packets that are 'after' the current 'minimum' hold - till the cut-off time,
       then deliver
-    // If we are less than the ideal size, ignore the cut-off and grow till the ideal size.
   */
   while (!TAILQ_EMPTY(&b->list) &&
          (((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)
-//      || ((int64_t)(oldest - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)
-          || (/*b->list_size > b->ideal_len &&*/ (TAILQ_LAST(&b->list,list_t)->timestamp < cut))
-//      || b->list_size>200
+          || (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
            ))
   {
     if (!((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)) {
-      log_debug("loss","Clearing size %d last %f cut %f", b->list_size, /*b->ideal_len,*/ TAILQ_LAST(&b->list,list_t)->timestamp, cut);
+      log_debug("loss","Clearing size %d last %f cut %f", b->list_size,  TAILQ_LAST(&b->list,list_t)->timestamp, cut);
     }
     struct pkttailq *l = TAILQ_LAST(&b->list,list_t);
     TAILQ_REMOVE(&b->list, l, entry);
