@@ -89,7 +89,7 @@ ev_tstamp lastsent=0;
 uint64_t bandwidthdata=0;
 double bandwidth=0;
 
-static double avtime=3.0;
+static double avtime=1.0;
 
 struct resend_data
 {
