@@ -276,7 +276,6 @@ remove ->loss, as we dont use it - it's a sort of 'average' thing.
 make ->loss be the current loss
 maybe remove _av, as I think we should base on the current loss alone....
 
-do we need srtt_min, srtt_av, ...
 */
 #endif
 
@@ -741,7 +740,7 @@ mlvpn_rtun_new(const char *name,
                int server_mode, uint32_t timeout,
                int fallback_only, uint32_t bandwidth_max,
                uint32_t loss_tolerence, uint32_t quota,
-               uint32_t reorder_length, double srtt_target)
+               uint32_t reorder_length)
 {
     mlvpn_tunnel_t *new;
 
@@ -789,7 +788,6 @@ mlvpn_rtun_new(const char *name,
     new->srtt_av=40;
     new->srtt_av_d=0;
     new->srtt_av_c=0;
-    new->srtt_min=40;
     new->rttvar = 5;
     new->rtt_hit = 0;
     new->seq_last = 0;
@@ -805,7 +803,6 @@ mlvpn_rtun_new(const char *name,
       bandwidth_max=10000; // faster lines will go up faster from 10000, slower
                            // ones will drop from here.... it's a compromise
     }
-    new->srtt_target=srtt_target;
     new->bandwidth_max = bandwidth_max;
     new->bandwidth = bandwidth_max;
     new->bandwidth_measured=0;
@@ -1506,16 +1503,6 @@ void mlvpn_calc_bandwidth(uint32_t len)
       t->loss_event=0;
       t->loss_cnt=0;
 
-      // Hunt a low water mark - ONLY when traffic is low - allow SLOW drift
-      if (t->srtt_av > 0 && t->bandwidth_out < t->bandwidth_max/5 ) {
-        if (t->srtt_av < t->srtt_min) {
-          t->srtt_min = t->srtt_av;
-        } else {
-            t->srtt_min = ((t->srtt_min*9)+t->srtt_av)/10;
-        }
-      }
-      
-//      double target=t->srtt_target>0?t->srtt_target:t->srtt_min*1.25;
       // hunt a high watermark with slow drift
 //      if (t->srtt_av < target) {
       if (t->sent_loss == 0) {

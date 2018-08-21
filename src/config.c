@@ -264,7 +264,6 @@ mlvpn_config(int config_file_fd, int first_time)
                 uint32_t bwlimit = 0;
                 uint32_t quota = 0;
                 uint32_t reorder_length = 1;
-                uint32_t srtt_target = 0;
                 uint32_t timeout = 30;
                 uint32_t loss_tolerence=default_loss_tolerence;
                 int create_tunnel = 1;
@@ -317,9 +316,6 @@ mlvpn_config(int config_file_fd, int first_time)
                     NULL, 0);
                 _conf_set_uint_from_conf(
                     config, lastSection, "reorder_length", &reorder_length, 1,
-                    NULL, 0);
-                _conf_set_uint_from_conf(
-                    config, lastSection, "srtt_target", &srtt_target, 0,
                     NULL, 0);
                 _conf_set_uint_from_conf(
                     config, lastSection, "timeout", &timeout, default_timeout,
@@ -381,12 +377,6 @@ mlvpn_config(int config_file_fd, int first_time)
                                 tmptun->name, tmptun->fallback_only, fallback_only);
                             tmptun->fallback_only = fallback_only;
                         }
-                        if (tmptun->srtt_target != srtt_target)
-                        {
-                          log_info("config", "%s target srtt changed from %f to %d",
-                                tmptun->name, tmptun->srtt_target, srtt_target);
-                            tmptun->srtt_target = srtt_target;
-                        }
                         if (tmptun->bandwidth_max != bwlimit)
                         {
                           log_info("config", "%s bandwidth changed from %d to %d",
@@ -426,7 +416,7 @@ mlvpn_config(int config_file_fd, int first_time)
                     mlvpn_rtun_new(
                         lastSection, bindaddr, bindport, binddev, bindfib, dstaddr, dstport,
                         default_server_mode, timeout, fallback_only,
-                        bwlimit, loss_tolerence, quota, reorder_length, srtt_target);
+                        bwlimit, loss_tolerence, quota, reorder_length);
                 }
                 if (bindaddr)
                     free(bindaddr);
