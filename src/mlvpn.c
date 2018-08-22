@@ -433,7 +433,7 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
           mlvpn_rtun_resend((struct resend_data *)decap_pkt.data);
         } else {
           if (tun->status >= MLVPN_AUTHOK) {
-            log_warnx("protocol", "Unknown packet type %d\n", decap_pkt.type);
+            log_warnx("protocol", "Unknown packet type %d", decap_pkt.type);
           }
         }
     }
@@ -441,15 +441,14 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
 
 int mlvpn_loss_pack(mlvpn_tunnel_t *t)
 {
-  if (t->loss_av >= t->loss_tolerence) {
-    return 31;
-  } else {
-    return (t->loss_av * 31) / t->loss_tolerence;
-  }
+  if (t->loss_av >= (float)t->loss_tolerence) return 31;
+  int v=(int)((t->loss_av * 31.0) / (float)t->loss_tolerence);
+  if (t->loss_av>0 && v==0) return 1;
+  return v;
 }
 float mlvpn_loss_unpack(mlvpn_tunnel_t *t, uint16_t v)
 {
-  return (v * t->loss_tolerence)/31;
+  return ((float)v * (float)t->loss_tolerence)/31.0;
 }
 
 
@@ -1190,7 +1189,8 @@ mlvpn_tunnel_t *best_quick_tun(mlvpn_tunnel_t *not)
   LIST_FOREACH(t, &rtuns, entries) {
     if (t->status == MLVPN_AUTHOK &&
         t!=not &&
-        t->sent_loss==0 &&
+//        t->sent_loss==0 &&
+        t->sent_loss<(double)t->loss_tolerence/4.0 &&
         (!best || mlvpn_cb_length(t->hpsbuf) < mlvpn_cb_length(best->hpsbuf)))
       best=t;
   }
@@ -1386,7 +1386,7 @@ mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn)
     mlvpn_pkt_t *pkt;
     mlvpn_tunnel_t *t=best_quick_tun(loss_tun);
     if (!t) {
-      log_debug("resend", "No tunnel to request on\n");
+      log_debug("resend", "No suitable tunnel to request resend");
       return;
     }
     if (mlvpn_cb_is_full(t->hpsbuf))
@@ -1435,7 +1435,7 @@ mlvpn_rtun_resend(struct resend_data *d)
         pkt->type=MLVPN_PKT_DATA_RESEND;
         log_debug("resend", "resend on tunnel %s, packet (tun seq: %lu data seq %lu) previously sent on %s", t->name, d->seqn, old_pkt->seq, loss_tun->name);
       } else {
-        log_debug("protocol", "All tunnels down, unable to resend (tun seq: %lu data seq %lu)",d->seqn, old_pkt->seq);
+        log_debug("resend", "No suitable tunnel, unable to resend (tun seq: %lu data seq %lu)",d->seqn, old_pkt->seq);
       }
     } else {
       log_debug("resend", "Wont resent packet (tun seq: %lu data seq %lu) of type %d", d->seqn, old_pkt->seq, (unsigned char)old_pkt->data[6]);
@@ -1506,7 +1506,7 @@ void mlvpn_calc_bandwidth(uint32_t len)
 
       if (t->loss_cnt) {
         double current_loss=((double)t->loss_event * 100.0)/ (double)t->loss_cnt;
-        t->loss_av=((t->loss_av*3)+current_loss)/4;
+        t->loss_av=current_loss;//((t->loss_av*3.0)+current_loss)/4.0;
       } else {
         if (t->loss_event || t->status!=MLVPN_AUTHOK) {
           t->loss_av=100.0;
@@ -1596,7 +1596,7 @@ mlvpn_rtun_send_disconnect(mlvpn_tunnel_t *t)
 static void
 mlvpn_rtun_check_lossy(mlvpn_tunnel_t *tun)
 {
-  int loss = tun->sent_loss;
+  double loss = tun->sent_loss;
   int status_changed = 0;
   ev_tstamp now = ev_now(EV_DEFAULT_UC);
   int keepalive_ok= ((tun->last_keepalive_ack != 0) || (tun->last_keepalive_ack + MLVPN_IO_TIMEOUT_DEFAULT*2 + ((tun->srtt_av/1000.0)*2)) > now);
@@ -1607,13 +1607,13 @@ mlvpn_rtun_check_lossy(mlvpn_tunnel_t *tun)
 //        mlvpn_rtun_status_down(tun);
     status_changed = 1;
   } else if (loss >= tun->loss_tolerence && tun->status == MLVPN_AUTHOK) {
-    log_info("rtt", "%s packet loss reached threashold: %d%%/%d%%",
+    log_info("rtt", "%s packet loss reached threashold: %f%%/%d%%",
              tun->name, loss, tun->loss_tolerence);
     tun->status = MLVPN_LOSSY;
 //        mlvpn_rtun_status_down(tun);
     status_changed = 1;
   } else if (keepalive_ok && loss < tun->loss_tolerence && tun->status == MLVPN_LOSSY) {
-    log_info("rtt", "%s packet loss acceptable again: %d%%/%d%%",
+    log_info("rtt", "%s packet loss acceptable again: %f%%/%d%%",
              tun->name, loss, tun->loss_tolerence);
     tun->status = MLVPN_AUTHOK;
     status_changed = 1;
