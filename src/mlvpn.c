@@ -96,6 +96,7 @@ struct resend_data
   char r,s;
   uint64_t seqn;
   int tun_id;
+  int len;
 };
 
 struct mlvpn_status_s mlvpn_status = {
@@ -156,7 +157,7 @@ static void mlvpn_rtun_send_keepalive(ev_tstamp now, mlvpn_tunnel_t *t);
 static void mlvpn_rtun_send_disconnect(mlvpn_tunnel_t *t);
 static int mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf);
 static void mlvpn_rtun_resend(struct resend_data *d);
-static void mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn);
+static void mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn, int len);
 static void mlvpn_rtun_send_auth(mlvpn_tunnel_t *t);
 static void mlvpn_rtun_status_up(mlvpn_tunnel_t *t);
 static void mlvpn_rtun_tick_connect(mlvpn_tunnel_t *t);
@@ -274,28 +275,38 @@ void mlvpn_rtun_inject_tuntap(mlvpn_pkt_t *pkt)
 static void
 mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
 {
-  tun->loss_cnt++;
   if (seq >= tun->seq_last + 64) {
     /* consider a connection reset. */
     tun->seq_vect = (uint64_t) -1;
     tun->seq_last = seq;
+    tun->loss_cnt++;
   } else if (seq > tun->seq_last) {
     /* new sequence number -- recent message arrive */
+    int len=0;
+    int start=0;
     for (int i=0;i<seq-tun->seq_last;i++) {
+      tun->loss_cnt++; // inc the counter, _cnt shoudl be a count of all 'possible' pkt's
       if ((tun->seq_vect & (1ul<<(tun->reorder_length+1)))==0) {
-        log_debug("loss","%s lost %lu new seq %lu last seq %lu vector: %lx (reorder length: %d)",tun->name, tun->seq_last+i-(tun->reorder_length+1), seq, tun->seq_last, tun->seq_vect, tun->reorder_length);
-        mlvpn_rtun_request_resend(tun, tun->seq_last+i-(tun->reorder_length+1));
         tun->loss_event++;
-        tun->loss_cnt++; // inc the counter, _cnt shoudl be a count of all
-                         // 'possible' pkt's
+        len++;
+      } else {
+        if (len) {
+          log_debug("loss","%s lost %d pkts from %lu new seq %lu last seq %lu vector: %lx (reorder length: %d)",tun->name, len, tun->seq_last+start-(tun->reorder_length+1), seq, tun->seq_last, tun->seq_vect, tun->reorder_length);
+          mlvpn_rtun_request_resend(tun, tun->seq_last+start-(tun->reorder_length+1), len);
+          len=0;
+        }
+        start=i+1; // start again (maybe) at the next place, which MAY be a new hole.
       }
       tun->seq_vect<<=1;
     }
+    if (len) {
+      log_debug("loss","%s lost %d pkts from %lu new seq %lu last seq %lu vector: %lx (reorder length: %d)",tun->name, len, tun->seq_last+start-(tun->reorder_length+1), seq, tun->seq_last, tun->seq_vect, tun->reorder_length);
+      mlvpn_rtun_request_resend(tun, tun->seq_last+start-(tun->reorder_length+1), len);
+    }
     tun->seq_vect |= 1;
-
     tun->seq_last = seq;
-
   } else if (seq >= tun->seq_last - 63) {
+    tun->loss_cnt++;
     if ((tun->seq_vect & (1 << (tun->seq_last - seq)))==0) {
       tun->seq_vect |= (1 << (tun->seq_last - seq));
     }
@@ -315,6 +326,7 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
     /* consider a wrap round. */
     tun->seq_vect = (uint64_t) -1;
     tun->seq_last = seq;
+    tun->loss_cnt++;
   }
 }
 
@@ -1262,9 +1274,7 @@ mlvpn_rtun_status_down(mlvpn_tunnel_t *t)
       memcpy(pkt,old,sizeof(mlvpn_pkt_t));
     }
     // for the normal buffer, lets request resends of the last 'n' packets?
-    for (int i=0; i<200; i++) {
-      mlvpn_rtun_request_resend(t, t->seq_last+i);
-    }
+    mlvpn_rtun_request_resend(t, t->seq_last, 200);
 
     if (ev_is_active(&t->io_write)) {
         ev_io_stop(EV_A_ &t->io_write);
@@ -1381,7 +1391,7 @@ mlvpn_rtun_send_auth(mlvpn_tunnel_t *t)
 }
 
 static void
-mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn)
+mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn, int len)
 {
     mlvpn_pkt_t *pkt;
     mlvpn_tunnel_t *t=best_quick_tun(loss_tun);
@@ -1397,6 +1407,7 @@ mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn)
     d->s='S';
     d->seqn=tun_seqn;
     d->tun_id=loss_tun->id;
+    d->len=len;
     pkt->len = sizeof(struct resend_data);
 
     pkt->type = MLVPN_PKT_RESEND;
@@ -1422,26 +1433,29 @@ mlvpn_rtun_resend(struct resend_data *d)
     loss_tun->sent_loss++; // We KNOW they had a loss here !
     // Mark it as at least a '1', which will prevent some things from usng the tunnel
   }
-  if (loss_tun && loss_tun->old_pkts_n[d->seqn % PKTBUFSIZE] == d->seqn) {
-    mlvpn_pkt_t *old_pkt=loss_tun->old_pkts[d->seqn % PKTBUFSIZE];
-    set_reorder(old_pkt);
-    if (old_pkt->reorder) { // refuse to resend UDP packets!
-      mlvpn_tunnel_t *t=best_quick_tun(loss_tun);
-      if (t) {
-        if (mlvpn_cb_is_full(t->hpsbuf))
-          log_warnx("net", "%s high priority buffer: overflow", t->name);
-        pkt = mlvpn_pktbuffer_write(t->hpsbuf);
-        memcpy(pkt, old_pkt, sizeof(mlvpn_pkt_t));
-        pkt->type=MLVPN_PKT_DATA_RESEND;
-        log_debug("resend", "resend on tunnel %s, packet (tun seq: %lu data seq %lu) previously sent on %s", t->name, d->seqn, old_pkt->seq, loss_tun->name);
+  for (int i=0; i<d->len;i++) {
+    uint64_t seqn=d->seqn+i;
+    if (loss_tun && loss_tun->old_pkts_n[seqn % PKTBUFSIZE] == seqn) {
+      mlvpn_pkt_t *old_pkt=loss_tun->old_pkts[seqn % PKTBUFSIZE];
+      set_reorder(old_pkt);
+      if (old_pkt->reorder) { // refuse to resend UDP packets!
+        mlvpn_tunnel_t *t=best_quick_tun(loss_tun);
+        if (t) {
+          if (mlvpn_cb_is_full(t->hpsbuf))
+            log_warnx("net", "%s high priority buffer: overflow", t->name);
+          pkt = mlvpn_pktbuffer_write(t->hpsbuf);
+          memcpy(pkt, old_pkt, sizeof(mlvpn_pkt_t));
+          pkt->type=MLVPN_PKT_DATA_RESEND;
+          log_debug("resend", "resend on tunnel %s, packet (tun seq: %lu data seq %lu) previously sent on %s", t->name, seqn, old_pkt->seq, loss_tun->name);
+        } else {
+          log_debug("resend", "No suitable tunnel, unable to resend (tun seq: %lu data seq %lu)",seqn, old_pkt->seq);
+        }
       } else {
-        log_debug("resend", "No suitable tunnel, unable to resend (tun seq: %lu data seq %lu)",d->seqn, old_pkt->seq);
+        log_debug("resend", "Wont resent packet (tun seq: %lu data seq %lu) of type %d", seqn, old_pkt->seq, (unsigned char)old_pkt->data[6]);
       }
     } else {
-      log_debug("resend", "Wont resent packet (tun seq: %lu data seq %lu) of type %d", d->seqn, old_pkt->seq, (unsigned char)old_pkt->data[6]);
+      log_debug("resend", "unable to resend seq %lu (Not Found)",seqn);
     }
-  } else {
-    log_debug("resend", "unable to resend seq %lu (Not Found)",d->seqn);
   }
 }
 
