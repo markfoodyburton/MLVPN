@@ -1258,9 +1258,8 @@ mlvpn_rtun_status_down(mlvpn_tunnel_t *t)
     t->srtt_raw=0;
     t->loss_av=100;
 
-    mlvpn_pktbuffer_reset(t->sbuf);
-    mlvpn_pktbuffer_reset(t->hpsbuf);
-
+    mlvpn_rtun_recalc_weight();
+    
     // Resend anything that was in flight !!!!
     // for the hps, lest just try to resend what we know is outstanding
     while (!mlvpn_cb_is_empty(t->hpsbuf))
@@ -1273,8 +1272,11 @@ mlvpn_rtun_status_down(mlvpn_tunnel_t *t)
       mlvpn_pkt_t *pkt = mlvpn_pktbuffer_write(tun->hpsbuf);
       memcpy(pkt,old,sizeof(mlvpn_pkt_t));
     }
-    // for the normal buffer, lets request resends of the last 'n' packets?
-    mlvpn_rtun_request_resend(t, t->seq_last, 200);
+    mlvpn_pktbuffer_reset(t->sbuf);
+    mlvpn_pktbuffer_reset(t->hpsbuf);
+    // for the normal buffer, lets request resends of all possible packets from
+    // the last one we recieved
+    mlvpn_rtun_request_resend(t, t->seq_last, PKTBUFSIZE);
 
     if (ev_is_active(&t->io_write)) {
         ev_io_stop(EV_A_ &t->io_write);
@@ -1618,13 +1620,16 @@ mlvpn_rtun_check_lossy(mlvpn_tunnel_t *tun)
   if (!keepalive_ok && tun->status == MLVPN_AUTHOK) {
     log_info("rtt", "%s keepalive reached threashold, keepalive recieved %fs ago", tun->name, now-tun->last_keepalive_ack);
     tun->status = MLVPN_LOSSY;
-//        mlvpn_rtun_status_down(tun);
+    mlvpn_rtun_request_resend(tun, tun->seq_last, PKTBUFSIZE);
+    // We wont mark the tunnel down yet (hopefully it will come back again, and
+    // coming back from a loss is quicker than pulling it down etc. However,
+    // here, we fear the worst, and will ask for all packets again. Lets hope
+    // there are not too many in flight.
     status_changed = 1;
   } else if (loss >= tun->loss_tolerence && tun->status == MLVPN_AUTHOK) {
     log_info("rtt", "%s packet loss reached threashold: %f%%/%d%%",
              tun->name, loss, tun->loss_tolerence);
     tun->status = MLVPN_LOSSY;
-//        mlvpn_rtun_status_down(tun);
     status_changed = 1;
   } else if (keepalive_ok && loss < tun->loss_tolerence && tun->status == MLVPN_LOSSY) {
     log_info("rtt", "%s packet loss acceptable again: %f%%/%d%%",
