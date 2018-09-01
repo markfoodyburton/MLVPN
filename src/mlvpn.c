@@ -88,6 +88,7 @@ static uint64_t data_seq = 0;
 ev_tstamp lastsent=0;
 uint64_t bandwidthdata=0;
 double bandwidth=0;
+uint64_t out_resends=0;
 
 static double avtime=3.0; // long enough to make sensible averages
 
@@ -529,9 +530,9 @@ mlvpn_protocol_read(
         } else {
           tun->sent_loss=0;
         }
-//        if (decap_pkt->reorder && decap_pkt->seq) {// > tun->last_seen) {
-//          tun->last_seen=decap_pkt->seq;
-//        }
+        if (decap_pkt->reorder && decap_pkt->seq) {// > tun->last_seen) {
+          tun->last_seen=decap_pkt->seq;
+        }
     } else {
         decap_pkt->reorder = 0;
         decap_pkt->seq = 0;
@@ -779,7 +780,7 @@ mlvpn_rtun_new(const char *name,
     new->reorder_length_preset= reorder_length;
     new->reorder_length_max=0;
     new->seq = 0;
-//    new->last_seen = 0;
+    new->last_seen = 0;
     new->saved_timestamp = -1;
     new->saved_timestamp_received_at = 0;
     new->srtt = 40;
@@ -1013,10 +1014,6 @@ mlvpn_rtun_bind(mlvpn_tunnel_t *t)
              t->name, t->bindaddr ? t->bindaddr : "any",
              bindifstr);
 
-#if 0
-    /* this doesn't work ??? Or maybe???*/
-    /* SHould revert to my earlier version */
-#endif
     if (*t->binddev) {
       memset(&ifr, 0, sizeof(ifr));
       snprintf(ifr.ifr_name, sizeof(ifr.ifr_name) - 1, t->binddev);
@@ -1259,7 +1256,7 @@ mlvpn_rtun_status_down(mlvpn_tunnel_t *t)
     t->loss_av=100;
 
     mlvpn_rtun_recalc_weight();
-    
+
     // Resend anything that was in flight !!!!
     // for the hps, lest just try to resend what we know is outstanding
     while (!mlvpn_cb_is_empty(t->hpsbuf))
@@ -1413,7 +1410,7 @@ mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn, int len)
     pkt->len = sizeof(struct resend_data);
 
     pkt->type = MLVPN_PKT_RESEND;
-
+    out_resends++;
     log_debug("resend", "On %s request resend %lu (lost from tunnel %s)", t->name, tun_seqn, loss_tun->name);
 }
 
