@@ -270,9 +270,11 @@ void mlvpn_reorder_drain()
 {
   struct mlvpn_reorder_buffer *b=reorder_buffer;
   unsigned int drain_cnt = 0;
-//  ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat*(out_resends?2:1));
-  ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat);
+  ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat*(out_resends?3.0:1.0));
+//  ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat);
+  ev_tstamp bcut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat*5.0);
 
+//#if 0
   uint64_t oldest=b->min_seqn;
   if (b->min_seqn != TAILQ_LAST(&b->list,list_t)->pkt.seq)
   {
@@ -294,7 +296,10 @@ void mlvpn_reorder_drain()
   // oldest is now either b->min_seqn, or an older seqn - which would mean that
   // an active, and 'OK' tunnel is currently behind the current b->min_seqn.
   // In which case, we should not cut.
-  
+  if ((b->min_seqn - oldest)>0) { // e.g. it's older, dont give up just yet!
+    cut=bcut;
+  }
+//#endif
 //  if there are no outstandings - then we could use this code - to cut quicker?
 #if 0
   // If there is no chance of getting a packet (it's older than the latest
@@ -339,16 +344,16 @@ void mlvpn_reorder_drain()
   */
   while (!TAILQ_EMPTY(&b->list) &&
          (((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)
-          || ((TAILQ_LAST(&b->list,list_t)->timestamp < cut) && ((b->min_seqn - oldest)<=0))
+          || (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
            ))
   {
     if (!((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)) {
       log_debug("loss","Clearing size %d last %f cut %f outstanding resends %lu", b->list_size,  TAILQ_LAST(&b->list,list_t)->timestamp, cut, out_resends);
-      mlvpn_tunnel_t *t;
-      LIST_FOREACH(t, &rtuns, entries)
-      {
-        printf("%s %d %lx %f %lu %lu\n",t->name, t->reorder_length, t->seq_vect, ((ev_now(EV_DEFAULT_UC)-(t->last_activity))*1000)/t->srtt_av, t->last_seen, oldest);
-      }
+//      mlvpn_tunnel_t *t;
+//      LIST_FOREACH(t, &rtuns, entries)
+//      {
+//        printf("%s %d %lx %f %lu %lu\n",t->name, t->reorder_length, t->seq_vect, ((ev_now(EV_DEFAULT_UC)-(t->last_activity))*1000)/t->srtt_av, t->last_seen, oldest);
+//      }
     }
     struct pkttailq *l = TAILQ_LAST(&b->list,list_t);
     TAILQ_REMOVE(&b->list, l, entry);
