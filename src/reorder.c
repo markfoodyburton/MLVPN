@@ -78,6 +78,16 @@ extern uint64_t out_resends;
 
 void mlvpn_reorder_drain();
 
+int aolderb(uint64_t a, uint64_t b)
+{
+  return ((int64_t)(b-a)) > 0;
+}
+int aoldereqb(uint64_t a, uint64_t b)
+{
+  return ((int64_t)(b-a)) >= 0;
+}
+
+
 int mlvpn_reorder_length() 
 {
   int r=reorder_buffer->list_size_max;
@@ -118,10 +128,6 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
       /* We don't want to monitor fallback only links inside the
        * reorder timeout algorithm
        */
-/*      if (t->srtt_av > 0 && t->srtt_av < 1000) {
-        max_srtt+= t->srtt_av;
-        ts++;
-        }*/
       if (t->srtt_av > max_srtt) {
         max_srtt = t->srtt_av;
         ts=1;
@@ -184,7 +190,8 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
   struct mlvpn_reorder_buffer *b=reorder_buffer;
 
   if (pkt->type == MLVPN_PKT_DATA_RESEND) {
-    if ((int64_t)(b->min_seqn - pkt->seq) > 0) {
+    if (out_resends>0) out_resends--;
+    if (aolderb(pkt->seq, b->min_seqn)) {
       log_debug("resend","Rejecting (un-necissary ?) resend %lu",pkt->seq);
       return;
     } else {
@@ -212,8 +219,8 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
     log_debug("reorder", "initial sequence: %"PRIu64"", pkt->seq);
   }
 
-  if (((int64_t)(b->min_seqn - pkt->seq) > 0)) {
-    log_debug("reorder", "got old insert %d behind (probably agressive pruning) on %s",(int)(b->min_seqn - pkt->seq), tun->name);
+  if (aolderb(pkt->seq, b->min_seqn)) {
+    log_debug("loss", "got old insert %d behind (probably agressive pruning) on %s",(int)(b->min_seqn - pkt->seq), tun->name);
     b->loss++;
 //    mlvpn_rtun_inject_tuntap(pkt);
     if (!TAILQ_EMPTY(&b->list))  mlvpn_reorder_drain();
@@ -250,7 +257,7 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
       mlvpn_reorder_drain();
       return;
     }
-    if ((int64_t)(pkt->seq - l->pkt.seq)>0) break;
+    if (aolderb(l->pkt.seq, pkt->seq)) break;
   }
   if (l) {
     TAILQ_INSERT_BEFORE(l, p, entry);
@@ -271,70 +278,6 @@ void mlvpn_reorder_drain()
   struct mlvpn_reorder_buffer *b=reorder_buffer;
   unsigned int drain_cnt = 0;
   ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat*(out_resends?3.0:1.0));
-//  ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat);
-  ev_tstamp bcut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat*5.0);
-
-//#if 0
-  uint64_t oldest=b->min_seqn;
-  if (b->min_seqn != TAILQ_LAST(&b->list,list_t)->pkt.seq)
-  {
-    mlvpn_tunnel_t *t;
-    LIST_FOREACH(t, &rtuns, entries) {
-      if (t->reorder_length
-          && t->status == MLVPN_AUTHOK
-          &&  (t->last_activity > ev_now(EV_DEFAULT_UC)-3.0)
-// if there has been acivity in the last 3 seconds, we'll assume this tunnel isn't dead.
-// better keep all the tunnels 'active' to make sure that there is traffic on all tunnels, so we can prune better !!!!
-          ) {
-        uint64_t o=(t->last_seen - (t->reorder_length));
-        if (!oldest || ((int64_t)(oldest-o))>=0) {
-          oldest=o;
-        }
-      }
-    }
-  }
-  // oldest is now either b->min_seqn, or an older seqn - which would mean that
-  // an active, and 'OK' tunnel is currently behind the current b->min_seqn.
-  // In which case, we should not cut.
-  if ((b->min_seqn - oldest)>0) { // e.g. it's older, dont give up just yet!
-    cut=bcut;
-  }
-//#endif
-//  if there are no outstandings - then we could use this code - to cut quicker?
-#if 0
-  // If there is no chance of getting a packet (it's older than the latest
-  // packet seen on an ACTIVE  tunnel - the maximum reorder_length),
-  // then consider it lost
-  uint64_t oldest=0;
-  if (b->min_seqn != TAILQ_LAST(&b->list,list_t)->pkt.seq)
-  {
-    mlvpn_tunnel_t *t;
-    mlvpn_tunnel_t *ptun;
-    LIST_FOREACH(t, &rtuns, entries) {
-      if (t->reorder_length
-          && t->status >= MLVPN_AUTHOK
-          &&  (t->last_activity > ev_now(EV_DEFAULT_UC)-3.0)
-// if there has been acivity in the last 3 seconds, we'll assume this tunnel isn't dead.
-// better keep all the tunnels 'active' to make sure that there is traffic on all tunnels, so we can prune better !!!!
-          ) {
-        uint64_t o=(t->last_seen - (t->reorder_length));
-        if (!oldest || ((int64_t)(oldest-o))>=0) {
-          oldest=o;
-          ptun=t;
-        }
-      }
-    }
-
-    if (oldest==0 || (int64_t)(b->min_seqn - oldest)>=0) 
-    {
-      oldest=b->min_seqn;
-    } else {
-      printf("Pruning %lu (from %s reorder %d)\n",oldest - b->min_seqn, ptun->name, ptun->reorder_length);
-    }
-  } else {
-    oldest=b->min_seqn;
-  }
-#endif
 
 /* We should
   deliver all packets in order
@@ -343,17 +286,12 @@ void mlvpn_reorder_drain()
       then deliver
   */
   while (!TAILQ_EMPTY(&b->list) &&
-         (((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)
-          || (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
+         ( aoldereqb(TAILQ_LAST(&b->list,list_t)->pkt.seq, b->min_seqn)
+           || (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
            ))
   {
-    if (!((int64_t)(b->min_seqn - TAILQ_LAST(&b->list,list_t)->pkt.seq)>=0)) {
+    if (! aoldereqb(TAILQ_LAST(&b->list,list_t)->pkt.seq, b->min_seqn) ) {
       log_debug("loss","Clearing size %d last %f cut %f outstanding resends %lu", b->list_size,  TAILQ_LAST(&b->list,list_t)->timestamp, cut, out_resends);
-//      mlvpn_tunnel_t *t;
-//      LIST_FOREACH(t, &rtuns, entries)
-//      {
-//        printf("%s %d %lx %f %lu %lu\n",t->name, t->reorder_length, t->seq_vect, ((ev_now(EV_DEFAULT_UC)-(t->last_activity))*1000)/t->srtt_av, t->last_seen, oldest);
-//      }
     }
     struct pkttailq *l = TAILQ_LAST(&b->list,list_t);
     TAILQ_REMOVE(&b->list, l, entry);
@@ -368,13 +306,12 @@ void mlvpn_reorder_drain()
       b->delivered++;
       log_debug("reorder","Delivered %lu", l->pkt.seq);
       b->min_seqn=l->pkt.seq+1;
-    } else if ((int64_t)(b->min_seqn - l->pkt.seq)<0) { // cut off time reached
+    } else if (aolderb(b->min_seqn, l->pkt.seq)) { // cut off time reached
       mlvpn_rtun_inject_tuntap(&l->pkt);
       b->delivered++;
       b->loss+=l->pkt.seq - b->min_seqn;
       log_debug("loss","Lost %d from %lu, Delivered %lu", (int)(l->pkt.seq - b->min_seqn), b->min_seqn,  l->pkt.seq);
       b->min_seqn=l->pkt.seq+1;
-      break;
     } else {
       b->loss++;
       log_debug("loss","Lost %lu, (trying to deliver %lu)", l->pkt.seq, b->min_seqn);

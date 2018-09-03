@@ -530,9 +530,9 @@ mlvpn_protocol_read(
         } else {
           tun->sent_loss=0;
         }
-        if (decap_pkt->reorder && decap_pkt->seq) {// > tun->last_seen) {
-          tun->last_seen=decap_pkt->seq;
-        }
+//        if (decap_pkt->reorder && decap_pkt->seq) {// > tun->last_seen) {
+//          tun->last_seen=decap_pkt->seq;
+//        }
     } else {
         decap_pkt->reorder = 0;
         decap_pkt->seq = 0;
@@ -780,7 +780,7 @@ mlvpn_rtun_new(const char *name,
     new->reorder_length_preset= reorder_length;
     new->reorder_length_max=0;
     new->seq = 0;
-    new->last_seen = 0;
+//    new->last_seen = 0;
     new->saved_timestamp = -1;
     new->saved_timestamp_received_at = 0;
     new->srtt = 40;
@@ -1410,7 +1410,7 @@ mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn, int len)
     pkt->len = sizeof(struct resend_data);
 
     pkt->type = MLVPN_PKT_RESEND;
-    out_resends++;
+    out_resends+=len;
     log_debug("resend", "On %s request resend %lu (lost from tunnel %s)", t->name, tun_seqn, loss_tun->name);
 }
 
