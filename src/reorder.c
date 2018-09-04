@@ -32,12 +32,6 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/*
-  IDEAS:
-
-   1/ have a fixed length reorder buffer, controlled by a timer to deliver to the tun/tap.
-
-*/
 
 #include <inttypes.h>
 #include <string.h>
@@ -55,8 +49,6 @@ struct pkttailq
   TAILQ_ENTRY(pkttailq) entry;
 };
 
-
-
 /* The reorder buffer data structure itself */
 struct mlvpn_reorder_buffer {
   uint64_t min_seqn;  /**< Lowest seq. number that can be in the buffer */
@@ -66,6 +58,12 @@ struct mlvpn_reorder_buffer {
   int list_size_max;  // used to report only
   uint64_t loss;
   uint64_t delivered;
+
+  ev_tstamp last;
+  ev_tstamp diffs;
+  int arrived;
+
+  double max_srtt;
 
   TAILQ_HEAD(list_t, pkttailq) list, pool;
 };
@@ -110,13 +108,12 @@ double mlvpn_total_loss()
   
 void mlvpn_reorder_drain_timeout(EV_P_ ev_timer *w, int revents)
 {
-    log_debug("reorder", "reorder timeout. Packet loss?");
-
-    mlvpn_reorder_drain();
+  mlvpn_reorder_drain();
 }
 
 void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
 {
+
 
   mlvpn_tunnel_t *t;
   double max_srtt = 0.0;
@@ -142,12 +139,24 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
   if (max_srtt <= 0) {
     max_srtt=800;
   }
-//what about e.g. 1.5 x the longest stay in the buffer?
 
-  reorder_drain_timeout.repeat = (max_srtt*2.2)/1000.0;//2.2;// ((reorder_drain_timeout.repeat*9)+ t)/10;
+  struct mlvpn_reorder_buffer *b=reorder_buffer;
+  b->max_srtt=max_srtt;
+
+  if (b->arrived) {
+    ev_tstamp av=((b->diffs / (float)b->arrived)/2.0);
+    b->diffs=0;
+    b->arrived=0;
+    if (av > 0 && av < 1) {
+      reorder_drain_timeout.repeat=av;
+    } else {
+      reorder_drain_timeout.repeat=0.01;
+    }
+  } else {
+    reorder_drain_timeout.repeat=0.01;
+  }
+
   log_debug("reorder", "adjusting reordering drain timeout to %.0fms", reorder_drain_timeout.repeat*1000 );
-//  reorder_drain_timeout.repeat = 0.8;
-
 }
 
 // Called once from main.
@@ -156,11 +165,12 @@ void mlvpn_reorder_init()
   reorder_buffer=malloc(sizeof(struct mlvpn_reorder_buffer));
   TAILQ_INIT(&reorder_buffer->pool);
   TAILQ_INIT(&reorder_buffer->list);
-  reorder_drain_timeout.repeat = 0.8;
+  reorder_drain_timeout.repeat = 0.01;
   mlvpn_reorder_reset();
   ev_init(&reorder_drain_timeout, &mlvpn_reorder_drain_timeout);
   ev_timer_init(&reorder_timeout_tick, &mlvpn_reorder_tick, 0., 1.0);
   ev_timer_start(EV_A_ &reorder_timeout_tick);
+  ev_timer_start(EV_A_ &reorder_drain_timeout);
 }
 
 //called from main, or from config
@@ -177,6 +187,10 @@ mlvpn_reorder_reset()
   b->list_size_max=0;
   b->is_initialized=0;
   b->enabled=0;
+  b->last=0;
+  b->diffs=0;
+  b->arrived=0;
+  b->max_srtt=0.1;
 }
 
 void mlvpn_reorder_enable()
@@ -184,10 +198,14 @@ void mlvpn_reorder_enable()
   reorder_buffer->enabled=1;
 }
 
-
 void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
 {
   struct mlvpn_reorder_buffer *b=reorder_buffer;
+  ev_tstamp now=ev_now(EV_DEFAULT_UC);
+  ev_tstamp diff=now - b->last;
+  b->last = now;
+  b->diffs+=diff;
+  b->arrived++;
 
   if (pkt->type == MLVPN_PKT_DATA_RESEND) {
     if (out_resends>0) out_resends--;
@@ -198,8 +216,8 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
       log_debug("resend","Injecting resent %lu",pkt->seq);
     }
   } else if (!b->enabled || !pkt->reorder || !pkt->seq || pkt->seq==b->min_seqn)
-    // if this is a resend, it will not be marked as reorderable, so we
-         // must skip fast delivery
+    // if this is a resend, it may  not be marked as reorderable, so we
+    // must skip fast delivery
   {
     if (pkt->seq==b->min_seqn) {
       log_debug("reorder", "Inject TCP packet Just In Time (seqn %lu)", pkt->seq);
@@ -207,7 +225,6 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
     }
     mlvpn_rtun_inject_tuntap(pkt);
     b->delivered++;
-    if (!TAILQ_EMPTY(&b->list))  mlvpn_reorder_drain();
     return;
   }
 
@@ -222,8 +239,6 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
   if (aolderb(pkt->seq, b->min_seqn)) {
     log_debug("loss", "got old insert %d behind (probably agressive pruning) on %s",(int)(b->min_seqn - pkt->seq), tun->name);
     b->loss++;
-//    mlvpn_rtun_inject_tuntap(pkt);
-    if (!TAILQ_EMPTY(&b->list))  mlvpn_reorder_drain();
     return;
   }
 
@@ -254,7 +269,6 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
     if (pkt->seq == l->pkt.seq) { // replicated packet!
       log_debug("resend","Un-necissary resend %lu",pkt->seq);
       TAILQ_INSERT_TAIL(&b->pool, p, entry);
-      mlvpn_reorder_drain();
       return;
     }
     if (aolderb(l->pkt.seq, pkt->seq)) break;
@@ -270,28 +284,42 @@ void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
     b->list_size_max = b->list_size;
   }
 
-  mlvpn_reorder_drain(); // now see what can be drained off
 }
 
 void mlvpn_reorder_drain()
 {
   struct mlvpn_reorder_buffer *b=reorder_buffer;
   unsigned int drain_cnt = 0;
-  ev_tstamp cut=ev_now(EV_DEFAULT_UC) - (reorder_drain_timeout.repeat*(out_resends?3.0:1.0));
+  // 2.2 is a good window size
+  // 3 * more when we have resends (there and back + processing time etc)
+  ev_tstamp cut=ev_now(EV_DEFAULT_UC) - ((double)b->max_srtt/1000.0*(out_resends?6.6:2.2));
 
 /* We should
   deliver all packets in order
     Packets that are 'before' the current 'minium' - drop
     Packets that are 'after' the current 'minimum' hold - till the cut-off time,
       then deliver
-  */
+
+  We would love a list that was equal to the number of things we need such
+  that (max_srtt*2 + processing, + other things in the resend queue) time can
+  pass, and we'll still be able to fill in wih resends...
+  Lets call that max_srtt*6.6 (as above)
+
+  But, no point having a length greater than  we could be asking for
+  (e.g. that could be found in the pkt list)
+*/
+
+  int target_len=(int)(b->max_srtt*6.6/(reorder_drain_timeout.repeat * 1000));
+  if (target_len > PKTBUFSIZE*3) target_len=PKTBUFSIZE*3;
   while (!TAILQ_EMPTY(&b->list) &&
          ( aoldereqb(TAILQ_LAST(&b->list,list_t)->pkt.seq, b->min_seqn)
            || (TAILQ_LAST(&b->list,list_t)->timestamp < cut)
+           || (b->list_size > target_len)
            ))
   {
-    if (! aoldereqb(TAILQ_LAST(&b->list,list_t)->pkt.seq, b->min_seqn) ) {
-      log_debug("loss","Clearing size %d last %f cut %f outstanding resends %lu", b->list_size,  TAILQ_LAST(&b->list,list_t)->timestamp, cut, out_resends);
+
+    if (!aoldereqb(TAILQ_LAST(&b->list,list_t)->pkt.seq, b->min_seqn) ) {
+      log_debug("loss","Clearing size %d last %f  outstanding resends %lu", b->list_size,  TAILQ_LAST(&b->list,list_t)->timestamp,  out_resends);
     }
     struct pkttailq *l = TAILQ_LAST(&b->list,list_t);
     TAILQ_REMOVE(&b->list, l, entry);
@@ -300,12 +328,12 @@ void mlvpn_reorder_drain()
     b->list_size--;
     drain_cnt++;
 
-
     if (l->pkt.seq == b->min_seqn) {  // normal delivery
       mlvpn_rtun_inject_tuntap(&l->pkt);
       b->delivered++;
       log_debug("reorder","Delivered %lu", l->pkt.seq);
       b->min_seqn=l->pkt.seq+1;
+      if (b->list_size < target_len) break;
     } else if (aolderb(b->min_seqn, l->pkt.seq)) { // cut off time reached
       mlvpn_rtun_inject_tuntap(&l->pkt);
       b->delivered++;
@@ -315,15 +343,7 @@ void mlvpn_reorder_drain()
     } else {
       b->loss++;
       log_debug("loss","Lost %lu, (trying to deliver %lu)", l->pkt.seq, b->min_seqn);
-      break;
     }
-
   }
 
-  if (TAILQ_EMPTY(&b->list)) {
-    out_resends=0;
-    ev_timer_stop(EV_A_ &reorder_drain_timeout);
-  } else {
-    ev_timer_again(EV_A_ &reorder_drain_timeout);
-  }
 }
