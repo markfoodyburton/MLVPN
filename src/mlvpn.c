@@ -85,12 +85,27 @@ char *process_title = NULL;
 int logdebug = 0;
 
 static uint64_t data_seq = 0;
-ev_tstamp lastsent=0;
 uint64_t bandwidthdata=0;
 double bandwidth=0;
+uint64_t num_packets=0;
 uint64_t out_resends=0;
 
-static double avtime=3.0; // long enough to make sensible averages
+#define BANDWIDTHCALCTIME 1.0
+//static double avtime=3.0; // long enough to make sensible averages
+static ev_timer bandwidth_calc_timer;
+
+circular_buffer_t *send_buffer;    /* send buffer */
+mlvpn_pkt_t *mlvpn_send_buffer_write(uint32_t len) 
+{
+  bandwidthdata+=len;
+  num_packets++;
+  if (mlvpn_cb_is_full(send_buffer)) return NULL;
+  mlvpn_pkt_t *pkt=mlvpn_pktbuffer_write(send_buffer);
+  pkt->len=len;
+  return pkt;
+}
+
+  
 
 struct resend_data
 {
@@ -167,6 +182,7 @@ static void mlvpn_update_status();
 static int mlvpn_rtun_bind(mlvpn_tunnel_t *t);
 static void update_process_title();
 static void mlvpn_tuntap_init();
+static void mlvpn_rtun_choose(EV_P_ ev_timer *w, int revents);
 static int
 mlvpn_protocol_read(mlvpn_tunnel_t *tun,
                     mlvpn_pkt_t *rawpkt,
@@ -833,6 +849,11 @@ mlvpn_rtun_new(const char *name,
     ev_timer_init(&new->io_timeout, mlvpn_rtun_check_timeout,
         0., MLVPN_IO_TIMEOUT_DEFAULT);
     ev_timer_start(EV_A_ &new->io_timeout);
+
+    new->send_timer.data = new;
+    ev_timer_init(&new->send_timer, &mlvpn_rtun_choose, 0., 0.01);
+    ev_timer_start(EV_A_ &new->send_timer);
+
     update_process_title();
     return new;
 }
@@ -921,8 +942,9 @@ mlvpn_rtun_recalc_weight_prio()
       return mlvpn_rtun_recalc_weight_srtt();
 
     if (bwavailable > 2 * bwneeded) {
-//      bandwidth_max = (realBW * 8)/1000, and we want it for avtime seconds
-        if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*avtime)) && (t->status == MLVPN_AUTHOK)) {
+//      bandwidth_max = (realBW * 8)/1000, and we want it for the number of
+//      seconds between bandwidth recalculations 
+        if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*BANDWIDTHCALCTIME)) && (t->status == MLVPN_AUTHOK)) {
           mlvpn_rtun_set_weight(t, bwneeded/50);
         } else {
           mlvpn_rtun_set_weight(t, 0);
@@ -944,7 +966,7 @@ mlvpn_rtun_recalc_weight_prio()
       bwavailable+=(t->bandwidth*part);
     } else {
       double bw=bwneeded - bwavailable;
-      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth_max*125*avtime)) && (t->status == MLVPN_AUTHOK)) {
+      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth_max*125*BANDWIDTHCALCTIME)) && (t->status == MLVPN_AUTHOK)) {
         if (t->bandwidth*part > bw) {
           mlvpn_rtun_set_weight(t, (bw*part));
           bwavailable+=bw*part;
@@ -953,7 +975,7 @@ mlvpn_rtun_recalc_weight_prio()
           bwavailable+=(t->bandwidth*part);
         }
       } else {
-        if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*avtime)) && (t->status == MLVPN_AUTHOK)) {
+        if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*BANDWIDTHCALCTIME)) && (t->status == MLVPN_AUTHOK)) {
           mlvpn_rtun_set_weight(t, bwneeded/50);
         } else {
           mlvpn_rtun_set_weight(t, 0);
@@ -1485,97 +1507,149 @@ mlvpn_rtun_tick_connect(mlvpn_tunnel_t *t)
         mlvpn_rtun_challenge_send(t);
     }
 }
-
-void mlvpn_calc_bandwidth(uint32_t len)
+//ev_tstamp last=0;
+void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
 {
-  ev_tstamp now=ev_now(EV_A);
+  ev_tstamp diff=BANDWIDTHCALCTIME;  
+  uint64_t mtu_av;
+  if (bandwidthdata && num_packets) mtu_av= bandwidthdata / num_packets;
+  else mtu_av=10;
 
-  if (lastsent==0) lastsent=now;
-  ev_tstamp diff=now - lastsent;
-  bandwidthdata+=len;
-  if (diff>avtime) {
-    lastsent=now;
-    bandwidth=((((double)bandwidthdata*8) / diff))/1000; // kbits/sec
-    bandwidthdata=0;
-    // what we can do here is add any bandwidth allocation
-    // The allocation should be per second.
-    // permittedis in bytes.
-    mlvpn_tunnel_t *t;
-    LIST_FOREACH(t, &rtuns, entries) {
-      // permitted is in BYTES per second.
-      if (t->quota) {
-        t->permitted+=(((double)t->quota * diff)*1000.0)/8.0; // listed in kbps
-      }
+  bandwidth=((((double)bandwidthdata*8) / diff))/1000; // kbits/sec
+  bandwidthdata=0;
+  num_packets = 0;
 
-      // calc the srtt average...
-      t->srtt_av = (t->srtt_av_d / t->srtt_av_c);
-      // reset so if we get no traffic, we still see a valid srtt
-      t->srtt_av_d=t->srtt_raw + (4*t->rttvar);;
-      t->srtt_av_c=1;
+  // what we can do here is add any bandwidth allocation
+  // The allocation should be per second.
+  // permittedis in bytes.
 
-      // calc measured bandwidth
-      t->bandwidth_measured=((((double)(t->bm_data)*8) / diff))/1000; // kbits/sec
-      t->bm_data=0;
+//  if (bandwidth) {
+    // use the tunnel MTU
+    // one timer per tunnel...
 
-      if (t->loss_cnt) {
-        double current_loss=((double)t->loss_event * 100.0)/ (double)t->loss_cnt;
-        t->loss_av=current_loss;//((t->loss_av*3.0)+current_loss)/4.0;
+//    send_timer.repeat = 1/((float)bandwidth/8.0*DEFAULT_MTU);
+    // calc current MTU
+//    send_timer.repeat = 0.01/((bandwidth/8.0)*1000.0/(float)DEFAULT_MTU);
+    
+//  }
+//  printf("Repeat %f %f  %d\n",send_timer.repeat, 1.0/((bandwidth/8.0)*1000.0/(float)DEFAULT_MTU), mlvpn_cb_length(send_buffer));
+  
+  mlvpn_tunnel_t *t;
+  LIST_FOREACH(t, &rtuns, entries) {
+    // permitted is in BYTES per second.
+    if (t->quota) {
+      t->permitted+=(((double)t->quota * diff)*1000.0)/8.0; // listed in kbps
+    }
+
+    // calc the srtt average...
+    t->srtt_av = (t->srtt_av_d / t->srtt_av_c);
+    // reset so if we get no traffic, we still see a valid srtt
+    t->srtt_av_d=t->srtt_raw + (4*t->rttvar);;
+    t->srtt_av_c=1;
+
+    // calc measured bandwidth
+    t->bandwidth_measured=((((double)(t->bm_data)*8) / diff))/1000; // kbits/sec
+    t->bm_data=0;
+
+    if (t->loss_cnt) {
+      double current_loss=((double)t->loss_event * 100.0)/ (double)t->loss_cnt;
+      t->loss_av=current_loss;//((t->loss_av*3.0)+current_loss)/4.0;
+    } else {
+      if (t->loss_event || t->status!=MLVPN_AUTHOK) {
+        t->loss_av=100.0;
       } else {
-        if (t->loss_event || t->status!=MLVPN_AUTHOK) {
-          t->loss_av=100.0;
-        } else {
-          t->loss_av=0;
-        }
+        t->loss_av=0;
       }
-      t->loss_event=0;
-      t->loss_cnt=0;
+    }
+    t->loss_event=0;
+    t->loss_cnt=0;
 
-      // hunt a high watermark with slow drift
+    // hunt a high watermark with slow drift
 //      if (t->srtt_av < target) {
-      if (t->sent_loss == 0) {
-        if (t->bandwidth_out>t->bandwidth_max) {
-          t->bandwidth_max=t->bandwidth_out;
-          // we could 'drift' the target here...
-        }
+    if (t->sent_loss == 0) {
+      if (t->bandwidth_out>t->bandwidth_max) {
+        t->bandwidth_max=t->bandwidth_out;
+        // we could 'drift' the target here...
+      }
 //      } else {
 //        if (t->bandwidth*2 < t->bandwidth_max && t->bandwidth_max > 10) {
 //          t->bandwidth_max *= 0.95;
 //        }
-      }
+    }
 
 //      if (t->srtt_av < target*0.9 && t->bandwidth < t->bandwidth_max) {
-      if (t->sent_loss==0) {
-        if (t->bandwidth < t->bandwidth_max) {
-          t->bandwidth*=1.05;
-        }
-      } else {
-        if (/*t->srtt_av > target*1.1 &&*/ t->bandwidth_out > (t->bandwidth_max/4)) {
-          t->bandwidth=t->bandwidth_out * 0.8;//(t->bandwidth*9 + t->bandwidth_out)/10;
-          if (t->bandwidth_max > 100) {
-            t->bandwidth_max=(t->bandwidth_max*9 + t->bandwidth)/10;
-          }
+    if (t->sent_loss==0) {
+      if (t->bandwidth < t->bandwidth_max*1.2) {
+        t->bandwidth*=1.15;
+      }
+    } else {
+      if (t->sent_loss > t->loss_tolerence/4.0)
+      if (/*t->srtt_av > target*1.1 &&*/ t->bandwidth_out > (t->bandwidth_max/4)) {
+        t->bandwidth=/*t->bandwidth_out * 0.8;//*/(t->bandwidth + t->bandwidth_out)/2;
+        if (t->bandwidth_max > 100) {
+          t->bandwidth_max=(t->bandwidth_max + t->bandwidth)/2;
         }
       }
-
-      if (t->seq_vect==(uint64_t)-1  /* !t->loss*/) {
-        if (t->reorder_length > t->reorder_length_preset) {
-          t->reorder_length--;
-        }
-      }
-
     }
-    mlvpn_rtun_recalc_weight();
+
+    if (t->seq_vect==(uint64_t)-1  /* !t->loss*/) {
+      if (t->reorder_length > t->reorder_length_preset) {
+        t->reorder_length--;
+      }
+    }
+  }
+  mlvpn_rtun_recalc_weight();
+
+  LIST_FOREACH(t, &rtuns, entries) {
+    t->send_timer.repeat = 0.75 / (((t->weight/8.0) * 1000.0)/mtu_av);
   }
 }
 
-mlvpn_tunnel_t *
-mlvpn_rtun_choose(uint32_t len)
+static void
+mlvpn_rtun_choose(EV_P_ ev_timer *w, int revents)
 {
-  mlvpn_tunnel_t *tun;
-  mlvpn_calc_bandwidth(len);
-  tun = mlvpn_rtun_wrr_choose(len);
-  return tun;
+  mlvpn_tunnel_t *rtun=NULL;
+
+  circular_buffer_t *sbuf;
+
+  mlvpn_pkt_t *pkt;
+  if (mlvpn_cb_is_empty(send_buffer)) return;
+//  printf("%d\n",mlvpn_cb_length(send_buffer));
+  mlvpn_pkt_t *spkt = mlvpn_pktbuffer_read(send_buffer);
+  u_char *data=(u_char *)(spkt->data);
+  uint32_t len=spkt->len;
+
+//#if 0
+#ifdef HAVE_FILTERS
+  rtun = mlvpn_filters_choose((uint32_t)len,data);
+  if (rtun) {
+    /* High priority buffer, not reorderd when a filter applies */
+    sbuf = rtun->hpsbuf;
+  }
+#endif
+  if (!rtun) {
+    rtun = w->data;
+    if (!rtun) rtun=mlvpn_rtun_wrr_choose(len);
+    /* Not connected to anyone. read and discard packet. */
+    
+    if (! rtun) return;
+    sbuf = rtun->sbuf;
+  }
+  
+  if (mlvpn_cb_is_full(sbuf))
+    log_warnx("tuntap", "%s buffer: overflow", rtun->name);
+  
+  /* Ask for a free buffer */
+  pkt = mlvpn_pktbuffer_write(sbuf);
+  pkt->len = len;
+  /* TODO: REALLY INEFFICIENT COPY */
+  memcpy(pkt->data, data, pkt->len);
+  if (!ev_is_active(&rtun->io_write) && !mlvpn_cb_is_empty(sbuf)) {
+    ev_io_start(EV_DEFAULT_UC, &rtun->io_write);
+  }
+  return;
 }
+
 
 static void
 mlvpn_rtun_send_keepalive(ev_tstamp now, mlvpn_tunnel_t *t)
@@ -1944,8 +2018,21 @@ main(int argc, char **argv)
 
     /* tun/tap initialization */
     mlvpn_tuntap_init();
+
+    ev_timer_init(&bandwidth_calc_timer, &mlvpn_calc_bandwidth, 0., BANDWIDTHCALCTIME);
+    ev_timer_start(EV_A_ &bandwidth_calc_timer);
+
     if (mlvpn_config(config_fd, 1) != 0)
         fatalx("cannot open config file");
+
+    {
+      mlvpn_tunnel_t *t;
+      int i=0,p=0;
+      LIST_FOREACH(t, &rtuns, entries) {i++;if (1<<p < i) p++;}
+      send_buffer = mlvpn_pktbuffer_init(PKTBUFSIZE<<p);
+    }
+//    ev_timer_init(&send_timer, &mlvpn_rtun_choose, 0., 0.01);
+//    ev_timer_start(EV_A_ &send_timer);
 
     if (mlvpn_tuntap_alloc(&tuntap) <= 0)
         fatalx("cannot create tunnel device");
@@ -1954,7 +2041,7 @@ main(int argc, char **argv)
     mlvpn_sock_set_nonblocking(tuntap.fd);
 
     preset_permitted(argc, saved_argv);
-    
+
     ev_io_set(&tuntap.io_read, tuntap.fd, EV_READ);
     ev_io_set(&tuntap.io_write, tuntap.fd, EV_WRITE);
     ev_io_start(loop, &tuntap.io_read);

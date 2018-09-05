@@ -310,7 +310,7 @@ void mlvpn_reorder_drain()
 */
 
   int target_len=(int)(b->max_srtt*6.6/(reorder_drain_timeout.repeat * 1000));
-  if (target_len > PKTBUFSIZE*3) target_len=PKTBUFSIZE*3;
+  if (target_len > PKTBUFSIZE*5) target_len=PKTBUFSIZE*5;
   while (!TAILQ_EMPTY(&b->list) &&
          ( aoldereqb(TAILQ_LAST(&b->list,list_t)->pkt.seq, b->min_seqn)
            || (TAILQ_LAST(&b->list,list_t)->timestamp < cut)

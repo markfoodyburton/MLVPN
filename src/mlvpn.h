@@ -199,6 +199,8 @@ typedef struct mlvpn_tunnel_s
     ev_io io_write;
     ev_timer io_timeout;
 
+    ev_timer send_timer;
+
     mlvpn_pkt_t *old_pkts[PKTBUFSIZE];
     uint64_t old_pkts_n[PKTBUFSIZE];
 } mlvpn_tunnel_t;
@@ -218,7 +220,7 @@ int mlvpn_loss_ratio(mlvpn_tunnel_t *tun);
 int mlvpn_rtun_wrr_reset(struct rtunhead *head, int use_fallbacks);
 void mlvpn_rtun_set_weight(mlvpn_tunnel_t *t, double weight);
 mlvpn_tunnel_t *mlvpn_rtun_wrr_choose();
-mlvpn_tunnel_t *mlvpn_rtun_choose(uint32_t len);
+//mlvpn_tunnel_t *mlvpn_rtun_choose(uint32_t len);
 mlvpn_tunnel_t *mlvpn_rtun_new(const char *name,
     const char *bindaddr, const char *bindport, const char *binddev, uint32_t bindfib,
     const char *destaddr, const char *destport,
@@ -231,6 +233,7 @@ void mlvpn_rtun_status_down(mlvpn_tunnel_t *t);
 #ifdef HAVE_FILTERS
 int mlvpn_filters_add(const struct bpf_program *filter, mlvpn_tunnel_t *tun);
 mlvpn_tunnel_t *mlvpn_filters_choose(uint32_t pktlen, const u_char *pktdata);
+mlvpn_pkt_t *mlvpn_send_buffer_write(uint32_t len);
 #endif
 
 #include "privsep.h"
