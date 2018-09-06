@@ -89,6 +89,8 @@ ev_tstamp lastsent=0;
 uint64_t bandwidthdata=0;
 double bandwidth=0;
 uint64_t out_resends=0;
+static ev_timer bandwidth_timer;
+uint64_t num_packets=0;
 
 static double avtime=3.0; // long enough to make sensible averages
 
@@ -167,6 +169,7 @@ static void mlvpn_update_status();
 static int mlvpn_rtun_bind(mlvpn_tunnel_t *t);
 static void update_process_title();
 static void mlvpn_tuntap_init();
+static void bandwidth_timer_init();
 static int
 mlvpn_protocol_read(mlvpn_tunnel_t *tun,
                     mlvpn_pkt_t *rawpkt,
@@ -1489,14 +1492,21 @@ mlvpn_rtun_tick_connect(mlvpn_tunnel_t *t)
 void mlvpn_calc_bandwidth(uint32_t len)
 {
   ev_tstamp now=ev_now(EV_A);
+  uint64_t total_max=0;
 
   if (lastsent==0) lastsent=now;
   ev_tstamp diff=now - lastsent;
   bandwidthdata+=len;
+  num_packets++;
   if (diff>avtime) {
+    uint64_t mtu_av;
+//    int np=num_packets;
     lastsent=now;
     bandwidth=((((double)bandwidthdata*8) / diff))/1000; // kbits/sec
+    if (bandwidthdata && num_packets) mtu_av= bandwidthdata / num_packets;
+    else mtu_av=10;
     bandwidthdata=0;
+    num_packets=0;
     // what we can do here is add any bandwidth allocation
     // The allocation should be per second.
     // permittedis in bytes.
@@ -1545,7 +1555,7 @@ void mlvpn_calc_bandwidth(uint32_t len)
 
 //      if (t->srtt_av < target*0.9 && t->bandwidth < t->bandwidth_max) {
       if (t->sent_loss==0) {
-        if (t->bandwidth < t->bandwidth_max) {
+        if (t->bandwidth < t->bandwidth_max*1.2) {
           t->bandwidth*=1.05;
         }
       } else {
@@ -1557,6 +1567,8 @@ void mlvpn_calc_bandwidth(uint32_t len)
         }
       }
 
+      total_max+=t->bandwidth_max;
+
       if (t->seq_vect==(uint64_t)-1  /* !t->loss*/) {
         if (t->reorder_length > t->reorder_length_preset) {
           t->reorder_length--;
@@ -1565,6 +1577,18 @@ void mlvpn_calc_bandwidth(uint32_t len)
 
     }
     mlvpn_rtun_recalc_weight();
+    if (total_max && mtu_av) {
+//      float tmp=bandwidth_timer.repeat;
+      bandwidth_timer.repeat = 0.95 / (float)((((float)total_max/8.0)*1000.0)/(float)mtu_av);
+//      bandwidth_timer.repeat = 0.95 / (float)((((float)70000/8.0)*1000.0)/(float)mtu_av);
+//      bandwidth_timer.repeat = 0.005;
+
+/*      printf("last bw: %f av %f (error %f), max %lu mtu %lu time %f limit to %f\n", bandwidth, min/np, ((min/np)-tmp)/tmp, total_max, mtu_av, bandwidth_timer.repeat,
+             ((((1.0/bandwidth_timer.repeat)*(float)mtu_av)/1000.0)*8)
+        );
+      min=0;
+*/
+    }
   }
 }
 
@@ -1679,12 +1703,31 @@ mlvpn_rtun_check_timeout(EV_P_ ev_timer *w, int revents)
     }
 }
 
-
+int io_arrived=0;
+void
+mlvpn_bandwidth_timer(EV_P_ ev_timer *w, int revents)
+{
+  if (io_arrived) {
+    int len=mlvpn_tuntap_read(&tuntap);
+    if (len<=0) {
+      io_arrived=0;
+    } else {
+      io_arrived--;
+    }
+    if (!io_arrived) {
+      ev_timer_stop(EV_A_ &bandwidth_timer);
+    }
+  }
+}
 static void
 tuntap_io_event(EV_P_ ev_io *w, int revents)
 {
     if (revents & EV_READ) {
-        mlvpn_tuntap_read(&tuntap);
+//      if (!ev_is_active(&bandwidth_timer)) {
+//        ev_timer_start(EV_A_ &bandwidth_timer);
+//      }
+//      io_arrived++;
+      mlvpn_tuntap_read(&tuntap);
     } else if (revents & EV_WRITE) {
         mlvpn_tuntap_write(&tuntap);
         /* Nothing else to read */
@@ -1692,6 +1735,11 @@ tuntap_io_event(EV_P_ ev_io *w, int revents)
             ev_io_stop(EV_A_ &tuntap.io_write);
         }
     }
+}
+static void bandwidth_timer_init()
+{
+//  ev_timer_init(&bandwidth_timer, &mlvpn_bandwidth_timer, 0., 0.5);
+//  ev_timer_start(EV_A_ &bandwidth_timer);
 }
 
 static void
@@ -1944,6 +1992,7 @@ main(int argc, char **argv)
 
     /* tun/tap initialization */
     mlvpn_tuntap_init();
+    bandwidth_timer_init();
     if (mlvpn_config(config_fd, 1) != 0)
         fatalx("cannot open config file");
 
