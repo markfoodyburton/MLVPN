@@ -73,6 +73,7 @@ extern void mlvpn_rtun_inject_tuntap(mlvpn_pkt_t *pkt);
 extern struct ev_loop *loop;
 static ev_timer reorder_timeout_tick;
 extern uint64_t out_resends;
+void mlvpn_reorder_reset();
 
 void mlvpn_reorder_drain();
 
@@ -119,8 +120,10 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
   double max_srtt = 0.0;
   int ts=0;
 
+  int up=0;
   LIST_FOREACH(t, &rtuns, entries)
   {
+    if (t->status >= MLVPN_AUTHOK) up++;
     if (t->status == MLVPN_AUTHOK && !t->fallback_only) {
       /* We don't want to monitor fallback only links inside the
        * reorder timeout algorithm
@@ -132,6 +135,10 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
         
     }
   }
+  if (up==0) {
+    mlvpn_reorder_reset();
+  }
+
   if (ts>0) {
     max_srtt/=ts;
   }
