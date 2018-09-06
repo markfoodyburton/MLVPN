@@ -180,11 +180,11 @@ typedef struct mlvpn_tunnel_s
     uint32_t reorder_length;  /* how many packets this tunnel can re-order */
     uint32_t reorder_length_max;
     uint32_t timeout;     /* configured timeout in seconds */
-    uint32_t bandwidth_max;   /* max bandwidth in bytes per second */
-    uint32_t bandwidth;   /* current bandwidth in bytes per second */
-    uint32_t bandwidth_measured;
-    uint32_t bm_data;
-    uint32_t bandwidth_out;
+    uint64_t bandwidth_max;   /* max bandwidth in bytes per second */
+    uint64_t bandwidth;   /* current bandwidth in bytes per second */
+    uint64_t bandwidth_measured;
+    uint64_t bm_data;
+    uint64_t bandwidth_out;
 //    uint32_t bandwidth_asked;
     circular_buffer_t *sbuf;    /* send buffer */
     circular_buffer_t *hpsbuf;  /* high priority buffer */

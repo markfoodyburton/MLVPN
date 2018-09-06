@@ -379,7 +379,7 @@ mlvpn_config(int config_file_fd, int first_time)
                         }
                         if (tmptun->bandwidth_max != bwlimit)
                         {
-                          log_info("config", "%s bandwidth changed from %d to %d",
+                          log_info("config", "%s bandwidth changed from %lu to %u",
                                 tmptun->name, tmptun->bandwidth_max, bwlimit);
                             if (bwlimit==0) {
                               bwlimit=10000;

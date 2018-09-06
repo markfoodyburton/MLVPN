@@ -70,7 +70,7 @@ extern double mlvpn_total_loss();
     "   \"recvpackets\": %" PRIu64 ",\n" \
     "   \"sentbytes\": %" PRIu64 ",\n" \
     "   \"recvbytes\": %" PRIu64 ",\n" \
-    "   \"bandwidth\": %u,\n" \
+    "   \"bandwidth\": %lu,\n" \
     "   \"srtt\": %.3f,\n" \
     "   \"lossin\": %.3f,\n" \
     "   \"lossout\": %.3f,\n" \

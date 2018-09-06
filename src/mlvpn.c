@@ -90,7 +90,7 @@ double bandwidth=0;
 uint64_t num_packets=0;
 uint64_t out_resends=0;
 
-#define BANDWIDTHCALCTIME 1.0
+#define BANDWIDTHCALCTIME 2.0
 //static double avtime=3.0; // long enough to make sensible averages
 static ev_timer bandwidth_calc_timer;
 
@@ -439,8 +439,8 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
                 tun->last_keepalive_ack_sent = tun->last_keepalive_ack;
                 mlvpn_rtun_send_keepalive(tun->last_keepalive_ack, tun);
             }
-            uint32_t bw=0;
-            sscanf(decap_pkt.data,"%u", &bw);
+            uint64_t bw=0;
+            sscanf(decap_pkt.data,"%lu", &bw);
             if (bw>0) {
               tun->bandwidth_out=bw;
             }
@@ -1454,6 +1454,8 @@ mlvpn_rtun_resend(struct resend_data *d)
     loss_tun->sent_loss++; // We KNOW they had a loss here !
     // Mark it as at least a '1', which will prevent some things from usng the tunnel
   }
+  loss_tun->send_timer.repeat *= 0.999;
+
   for (int i=0; i<d->len;i++) {
     uint64_t seqn=d->seqn+i;
     if (loss_tun && loss_tun->old_pkts_n[seqn % PKTBUFSIZE] == seqn) {
@@ -1507,14 +1509,16 @@ mlvpn_rtun_tick_connect(mlvpn_tunnel_t *t)
         mlvpn_rtun_challenge_send(t);
     }
 }
-//ev_tstamp last=0;
+ev_tstamp last=0;
 void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
 {
+  ev_tstamp now = ev_now(EV_DEFAULT_UC);
   ev_tstamp diff=BANDWIDTHCALCTIME;  
-  uint64_t mtu_av;
-  if (bandwidthdata && num_packets) mtu_av= bandwidthdata / num_packets;
-  else mtu_av=10;
-
+  if (last && (now-last)>BANDWIDTHCALCTIME/2 && (now-last)<BANDWIDTHCALCTIME*2) {
+    diff=now-last;
+  }
+  last=now;
+  
   bandwidth=((((double)bandwidthdata*8) / diff))/1000; // kbits/sec
   bandwidthdata=0;
   num_packets = 0;
@@ -1533,7 +1537,7 @@ void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
     
 //  }
 //  printf("Repeat %f %f  %d\n",send_timer.repeat, 1.0/((bandwidth/8.0)*1000.0/(float)DEFAULT_MTU), mlvpn_cb_length(send_buffer));
-  
+
   mlvpn_tunnel_t *t;
   LIST_FOREACH(t, &rtuns, entries) {
     // permitted is in BYTES per second.
@@ -1600,41 +1604,40 @@ void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
   }
   mlvpn_rtun_recalc_weight();
 
-  LIST_FOREACH(t, &rtuns, entries) {
-    t->send_timer.repeat = 0.75 / (((t->weight/8.0) * 1000.0)/mtu_av);
-  }
+//  LIST_FOREACH(t, &rtuns, entries) {
+//    t->send_timer.repeat = 1.0 / (((t->weight/8.0) * 1000.0)/mtu_av);
+//  }
 }
 
 static void
 mlvpn_rtun_choose(EV_P_ ev_timer *w, int revents)
 {
   mlvpn_tunnel_t *rtun=NULL;
-
+  rtun = w->data;
+  if (!rtun) return;
+  if (mlvpn_cb_is_empty(send_buffer)) return;
+  if (rtun->status!=MLVPN_AUTHOK) return;
+  if (rtun->quota && rtun->permitted < DEFAULT_MTU*2) return;
+  
   circular_buffer_t *sbuf;
+  sbuf = rtun->sbuf;
 
   mlvpn_pkt_t *pkt;
-  if (mlvpn_cb_is_empty(send_buffer)) return;
 //  printf("%d\n",mlvpn_cb_length(send_buffer));
   mlvpn_pkt_t *spkt = mlvpn_pktbuffer_read(send_buffer);
   u_char *data=(u_char *)(spkt->data);
   uint32_t len=spkt->len;
 
-//#if 0
 #ifdef HAVE_FILTERS
-  rtun = mlvpn_filters_choose((uint32_t)len,data);
-  if (rtun) {
+  // SWAP tunnels for a filter. - I think FILTERS should be removed !
+  mlvpn_tunnel_t *frtun = mlvpn_filters_choose((uint32_t)len,data);
+  if (frtun) {
     /* High priority buffer, not reorderd when a filter applies */
+    rtun=frtun;
     sbuf = rtun->hpsbuf;
   }
 #endif
-  if (!rtun) {
-    rtun = w->data;
-    if (!rtun) rtun=mlvpn_rtun_wrr_choose(len);
-    /* Not connected to anyone. read and discard packet. */
     
-    if (! rtun) return;
-    sbuf = rtun->sbuf;
-  }
   
   if (mlvpn_cb_is_full(sbuf))
     log_warnx("tuntap", "%s buffer: overflow", rtun->name);
@@ -1647,6 +1650,26 @@ mlvpn_rtun_choose(EV_P_ ev_timer *w, int revents)
   if (!ev_is_active(&rtun->io_write) && !mlvpn_cb_is_empty(sbuf)) {
     ev_io_start(EV_DEFAULT_UC, &rtun->io_write);
   }
+  
+/*  mlvpn_tunnel_t *t;
+  int i;
+  double av_srtt=0;
+  LIST_FOREACH(t, &rtuns, entries) {
+    av_srtt+=t->srtt_av;i++;
+  }
+  av_srtt/=i;
+
+  if (av_srtt>1 && rtun->srtt_raw>1) {
+    rtun->send_timer.repeat *= (((rtun->srtt_raw / av_srtt)-1.0)/100000.0)+1.0;
+  }
+*/
+  rtun->send_timer.repeat = ((float)len) / ((rtun->weight*1000.0)/8.0);
+
+
+  if (mlvpn_cb_length(send_buffer)==0) {
+    // stop it here, startit again if you need it
+  }
+  
   return;
 }
 
@@ -1661,7 +1684,7 @@ mlvpn_rtun_send_keepalive(ev_tstamp now, mlvpn_tunnel_t *t)
         log_debug("protocol", "%s sending keepalive", t->name);
         pkt = mlvpn_pktbuffer_write(t->hpsbuf);
         pkt->type = MLVPN_PKT_KEEPALIVE;
-        pkt->len=sprintf(pkt->data,"%u",t->bandwidth_measured) + 1;
+        pkt->len=sprintf(pkt->data,"%lu",t->bandwidth_measured) + 1;
     }
     t->next_keepalive = NEXT_KEEPALIVE(now, t);
 }
@@ -1758,7 +1781,9 @@ static void
 tuntap_io_event(EV_P_ ev_io *w, int revents)
 {
     if (revents & EV_READ) {
+      if (!mlvpn_cb_is_full(send_buffer)) {
         mlvpn_tuntap_read(&tuntap);
+      }
     } else if (revents & EV_WRITE) {
         mlvpn_tuntap_write(&tuntap);
         /* Nothing else to read */
@@ -2029,7 +2054,7 @@ main(int argc, char **argv)
       mlvpn_tunnel_t *t;
       int i=0,p=0;
       LIST_FOREACH(t, &rtuns, entries) {i++;if (1<<p < i) p++;}
-      send_buffer = mlvpn_pktbuffer_init(PKTBUFSIZE<<p);
+      send_buffer = mlvpn_pktbuffer_init(PKTBUFSIZE/*<<p*/);
     }
 //    ev_timer_init(&send_timer, &mlvpn_rtun_choose, 0., 0.01);
 //    ev_timer_start(EV_A_ &send_timer);
