@@ -94,6 +94,9 @@ uint64_t out_resends=0;
 //static double avtime=3.0; // long enough to make sensible averages
 static ev_timer bandwidth_calc_timer;
 
+// 28 is the ip header + the udp header
+#define  OVERHEAD (sizeof(mlvpn_proto_t)-DEFAULT_MTU + 28)
+
 circular_buffer_t *send_buffer;    /* send buffer */
 mlvpn_pkt_t *mlvpn_send_buffer_write(uint32_t len) 
 {
@@ -386,8 +389,8 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
         tun->recvpackets += 1;
         tun->bm_data += decap_pkt.len;
         if (tun->quota) {
-          if (tun->permitted > (len + 46)) {
-            tun->permitted -= (len + 46 /*UDP over Ethernet overhead*/);
+          if (tun->permitted > (len + OVERHEAD)) {
+            tun->permitted -= (len + OVERHEAD);
           } else {
             tun->permitted = 0;
           }
@@ -709,8 +712,8 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
         tun->sentpackets++;
         tun->sentbytes += ret;
         if (tun->quota) {
-          if (tun->permitted > (ret + 46)) {
-            tun->permitted -= (ret + 46 /*UDP over Ethernet overhead*/);
+          if (tun->permitted > (ret + OVERHEAD)) {
+            tun->permitted -= (ret + OVERHEAD);
           } else {
             tun->permitted = 0;
           }
@@ -935,7 +938,7 @@ mlvpn_rtun_recalc_weight_prio()
 
     
   mlvpn_tunnel_t *t;
-  double bwneeded=bandwidth * 5; /* do we need headroom e.g. * 1.5*/;
+  double bwneeded=bandwidth * 5 /** (mlvpn_cb_length(send_buffer)/100)*/; /* do we need headroom e.g. * 1.5*/;
   double bwavailable=0;
   LIST_FOREACH(t, &rtuns, entries) {
     if (t->bandwidth == 0) // bail out, we need to know the bandwidths to share
@@ -1454,8 +1457,9 @@ mlvpn_rtun_resend(struct resend_data *d)
     loss_tun->sent_loss++; // We KNOW they had a loss here !
     // Mark it as at least a '1', which will prevent some things from usng the tunnel
   }
-  loss_tun->send_timer.repeat *= 0.999;
-
+//  loss_tun->send_timer.repeat *= 0.9999;
+//  loss_tun->weight*=0.99;
+  
   for (int i=0; i<d->len;i++) {
     uint64_t seqn=d->seqn+i;
     if (loss_tun && loss_tun->old_pkts_n[seqn % PKTBUFSIZE] == seqn) {
@@ -1542,7 +1546,7 @@ void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
   LIST_FOREACH(t, &rtuns, entries) {
     // permitted is in BYTES per second.
     if (t->quota) {
-      t->permitted+=(((double)t->quota * diff)*1000.0)/8.0; // listed in kbps
+      t->permitted+=(((double)t->quota * diff)*1024.0)/8.0; // listed in kbps
     }
 
     // calc the srtt average...
@@ -1552,8 +1556,9 @@ void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
     t->srtt_av_c=1;
 
     // calc measured bandwidth
-    t->bandwidth_measured=((((double)(t->bm_data)*8) / diff))/1000; // kbits/sec
+    t->bandwidth_measured=((((double)t->bm_data*8.0)/1024.0) / diff); // kbits/sec
     t->bm_data=0;
+//    printf("BW: %s %lu\n",t->name, t->bandwidth_measured);
 
     if (t->loss_cnt) {
       double current_loss=((double)t->loss_event * 100.0)/ (double)t->loss_cnt;
@@ -1584,13 +1589,13 @@ void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
 //      if (t->srtt_av < target*0.9 && t->bandwidth < t->bandwidth_max) {
     if (t->sent_loss==0) {
       if (t->bandwidth < t->bandwidth_max*1.2) {
-        t->bandwidth*=1.15;
+        t->bandwidth*=1.05;
       }
     } else {
       if (t->sent_loss > t->loss_tolerence/4.0)
-      if (/*t->srtt_av > target*1.1 &&*/ t->bandwidth_out > (t->bandwidth_max/4)) {
+      if (t->bandwidth_out < t->bandwidth_max && /*t->srtt_av > target*1.1 &&*/ t->bandwidth_out > (t->bandwidth_max/4)) {
         t->bandwidth=/*t->bandwidth_out * 0.8;//*/(t->bandwidth + t->bandwidth_out)/2;
-        if (t->bandwidth_max > 100) {
+        if (t->bandwidth_max > 100 && t->bandwidth<t->bandwidth_max) {
           t->bandwidth_max=(t->bandwidth_max + t->bandwidth)/2;
         }
       }
@@ -1603,7 +1608,8 @@ void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
     }
   }
   mlvpn_rtun_recalc_weight();
-
+//  printf("%d\n",mlvpn_cb_length(send_buffer));
+  
 //  LIST_FOREACH(t, &rtuns, entries) {
 //    t->send_timer.repeat = 1.0 / (((t->weight/8.0) * 1000.0)/mtu_av);
 //  }
@@ -1663,9 +1669,13 @@ mlvpn_rtun_choose(EV_P_ ev_timer *w, int revents)
     rtun->send_timer.repeat *= (((rtun->srtt_raw / av_srtt)-1.0)/100000.0)+1.0;
   }
 */
-  rtun->send_timer.repeat = ((float)len) / ((rtun->weight*1000.0)/8.0);
-
-
+//  double speedup=(((float)mlvpn_cb_length(send_buffer)+1.0)/(float)PKTBUFSIZE) + 0.75;
+  rtun->send_timer.repeat = ((float)len + OVERHEAD) / (((rtun->weight*1024.0)/8.0)/**(speedup)*/);
+  if (mlvpn_cb_length(send_buffer) > PKTBUFSIZE/2) 
+    rtun->send_timer.repeat*=0.99;
+  if (mlvpn_cb_length(send_buffer) < PKTBUFSIZE/4) 
+    rtun->send_timer.repeat*=1.01;
+  
   if (mlvpn_cb_length(send_buffer)==0) {
     // stop it here, startit again if you need it
   }

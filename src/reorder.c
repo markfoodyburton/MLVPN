@@ -114,8 +114,7 @@ void mlvpn_reorder_drain_timeout(EV_P_ ev_timer *w, int revents)
 
 void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
 {
-
-
+  struct mlvpn_reorder_buffer *b=reorder_buffer;
   mlvpn_tunnel_t *t;
   double max_srtt = 0.0;
   int ts=0;
@@ -136,7 +135,7 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
     }
   }
   if (up==0) {
-    mlvpn_reorder_reset();
+    b->is_initialized=0;
   }
   
   if (ts>0) {
@@ -147,7 +146,6 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
     max_srtt=800;
   }
 
-  struct mlvpn_reorder_buffer *b=reorder_buffer;
   b->max_srtt=max_srtt;
 
   if (b->arrived) {

@@ -11,8 +11,6 @@ mlvpn_tuntap_generic_read(u_char *data, uint32_t len)
     /* TODO: INEFFICIENT COPY */
     memcpy(pkt->data, data, pkt->len);
     
-//  mlvpn_rtun_choose();
-    
     return pkt->len;
   }
   return 0;
