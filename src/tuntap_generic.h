@@ -27,14 +27,14 @@ struct tuntap_s
     int maxmtu;
     char devname[MLVPN_IFNAMSIZ];
     enum tuntap_type type;
-    circular_buffer_t *sbuf;
+  mlvpn_pkt_list_t sbuf; // no longer used
     ev_io io_read;
     ev_io io_write;
 };
 
 int mlvpn_tuntap_alloc(struct tuntap_s *tuntap);
-int mlvpn_tuntap_read(struct tuntap_s *tuntap);
-int mlvpn_tuntap_write(struct tuntap_s *tuntap);
+mlvpn_pkt_t *mlvpn_tuntap_read(struct tuntap_s *tuntap);
+int mlvpn_tuntap_write(struct tuntap_s *tuntap, mlvpn_pkt_t *pkt);
 int mlvpn_tuntap_generic_read(u_char *data, uint32_t len);
 
 #endif

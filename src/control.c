@@ -34,6 +34,7 @@ extern double bandwidth;
 void mlvpn_control_write_status(struct mlvpn_control *ctrl);
 extern int mlvpn_reorder_length();
 extern double mlvpn_total_loss();
+extern uint64_t pool_out;
 
 #define HTTP_HEADERS "HTTP/1.1 200 OK\r\n" \
     "Connection: close\r\n" \
@@ -56,6 +57,7 @@ extern double mlvpn_total_loss();
     "\"bandwidth_out\": %f,\n" \
     "\"reorder_length\": %d,\n"   \
     "\"total_loss\": %f,\n"     \
+    "\"memory_packets\": %lu,\n"       \
     "\"tunnels\": [\n"
 
 #define JSON_STATUS_RTUN "{\n" \
@@ -390,6 +392,8 @@ mlvpn_control_parse(struct mlvpn_control *ctrl, char *line)
         ctrl->close_after_write = 1;
 }
 
+extern mlvpn_pkt_list_t send_buffer;    /* send buffer */
+
 void mlvpn_control_write_status(struct mlvpn_control *ctrl)
 {
     char buf[1024];
@@ -404,9 +408,11 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl)
         0,
         tuntap.type == MLVPN_TUNTAPMODE_TUN ? "tun" : "tap",
         tuntap.devname,
-        bandwidth,
+//        bandwidth,
+                   (double) MLVPN_TAILQ_LENGTH(&send_buffer),
         mlvpn_reorder_length(),
-        mlvpn_total_loss()
+        mlvpn_total_loss(),
+        pool_out
     );
     mlvpn_control_write(ctrl, buf, ret);
     LIST_FOREACH(t, &rtuns, entries)
@@ -446,7 +452,8 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl)
                        t->disconnects,
                        (uint32_t)t->last_activity,
                        (uint32_t)t->timeout,
-                       t->weight,
+                       t->bytes_per_sec/128,//git it in kbps
+                       //t->weight,
                        (LIST_NEXT(t, entries) ? "," : "")
                       );
         t->reorder_length_max=t->reorder_length;

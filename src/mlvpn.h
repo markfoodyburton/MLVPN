@@ -50,7 +50,7 @@
 
 /* Number of packets in the queue. Each pkt is ~ 1520 */
 /* 1520 * 128 ~= 24 KBytes of data maximum per channel VMSize */
-#define PKTBUFSIZE 1024
+#define PKTBUFSIZE 1024*4
 
 /* tuntap interface name size */
 #ifndef IFNAMSIZ
@@ -186,8 +186,8 @@ typedef struct mlvpn_tunnel_s
     uint64_t bm_data;
     uint64_t bandwidth_out;
 //    uint32_t bandwidth_asked;
-    circular_buffer_t *sbuf;    /* send buffer */
-    circular_buffer_t *hpsbuf;  /* high priority buffer */
+    mlvpn_pkt_list_t sbuf;    /* send buffer */
+    mlvpn_pkt_list_t hpsbuf;  /* high priority buffer */
     struct addrinfo *addrinfo;
     enum chap_status status;    /* Auth status */
     ev_tstamp last_activity;
@@ -198,11 +198,16 @@ typedef struct mlvpn_tunnel_s
     ev_io io_read;
     ev_io io_write;
     ev_timer io_timeout;
+    ev_check check_ev;
+//      ev_idle idle_ev;
 
     ev_timer send_timer;
+    ev_tstamp last_adjust;
+    uint64_t bytes_since_adjust;
+    double bytes_per_sec;
+    int busy_writing;  
 
     mlvpn_pkt_t *old_pkts[PKTBUFSIZE];
-    uint64_t old_pkts_n[PKTBUFSIZE];
 } mlvpn_tunnel_t;
 
 #ifdef HAVE_FILTERS
@@ -233,7 +238,7 @@ void mlvpn_rtun_status_down(mlvpn_tunnel_t *t);
 #ifdef HAVE_FILTERS
 int mlvpn_filters_add(const struct bpf_program *filter, mlvpn_tunnel_t *tun);
 mlvpn_tunnel_t *mlvpn_filters_choose(uint32_t pktlen, const u_char *pktdata);
-mlvpn_pkt_t *mlvpn_send_buffer_write(uint32_t len);
+void mlvpn_send_buffer_write(mlvpn_pkt_t *p);
 #endif
 
 #include "privsep.h"

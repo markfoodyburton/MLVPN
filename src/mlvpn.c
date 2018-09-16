@@ -87,28 +87,62 @@ int logdebug = 0;
 static uint64_t data_seq = 0;
 uint64_t bandwidthdata=0;
 double bandwidth=0;
-uint64_t num_packets=0;
 uint64_t out_resends=0;
+double srtt_av;
 
-#define BANDWIDTHCALCTIME 2.0
-//static double avtime=3.0; // long enough to make sensible averages
-static ev_timer bandwidth_calc_timer;
-
-// 28 is the ip header + the udp header
-#define  OVERHEAD (sizeof(mlvpn_proto_t)-DEFAULT_MTU + 28)
-
-circular_buffer_t *send_buffer;    /* send buffer */
-mlvpn_pkt_t *mlvpn_send_buffer_write(uint32_t len) 
+mlvpn_pkt_list_t pool;
+uint64_t pool_out=0;
+mlvpn_pkt_t *mlvpn_pkt_get()
 {
-  bandwidthdata+=len;
-  num_packets++;
-  if (mlvpn_cb_is_full(send_buffer)) return NULL;
-  mlvpn_pkt_t *pkt=mlvpn_pktbuffer_write(send_buffer);
-  pkt->len=len;
-  return pkt;
+  mlvpn_pkt_t *p;
+  if (!MLVPN_TAILQ_EMPTY(&pool)) {
+    p = MLVPN_TAILQ_FIRST(&pool);
+    MLVPN_TAILQ_REMOVE(&pool, p);
+  } else {
+    p=malloc(sizeof (struct mlvpn_pkt_t));
+  }
+  pool_out++;
+  return p;
+};
+void mlvpn_pkt_release(mlvpn_pkt_t *p)
+{
+  pool_out--;
+  MLVPN_TAILQ_INSERT_HEAD(&pool, p);
+}
+void mlvpn_pkt_insert(mlvpn_pkt_list_t *list, mlvpn_pkt_t *pkt) 
+{
+  if (list->length >= list->max_size) {
+    log_warnx("lists", "buffer overflow");
+  }
+  MLVPN_TAILQ_INSERT_HEAD(list, pkt);
+}
+int mlvpn_pkt_list_is_full(mlvpn_pkt_list_t *list)
+{
+  return (list->length >= list->max_size);
+}
+void mlvpn_pkt_list_init(mlvpn_pkt_list_t *list, uint64_t size)
+{
+  MLVPN_TAILQ_INIT(list);
+  list->max_size=size;
 }
 
   
+
+#define BANDWIDTHCALCTIME 0.1
+//static double avtime=3.0; // long enough to make sensible averages
+static ev_timer bandwidth_calc_timer;
+
+
+mlvpn_pkt_list_t send_buffer;    /* send buffer */
+
+void mlvpn_send_buffer_write(mlvpn_pkt_t *p)
+{
+  if (p) {
+    // record the eventual wire length needed
+    bandwidthdata+=p->p.len + IP4_UDP_OVERHEAD + PKTHDRSIZ(p->p);
+    MLVPN_TAILQ_INSERT_HEAD(&send_buffer, p);
+  }
+}
 
 struct resend_data
 {
@@ -171,10 +205,13 @@ static struct option long_options[] = {
 static int mlvpn_rtun_start(mlvpn_tunnel_t *t);
 static void mlvpn_rtun_read(EV_P_ ev_io *w, int revents);
 static void mlvpn_rtun_write(EV_P_ ev_io *w, int revents);
+static void mlvpn_rtun_write_timeout(EV_P_ ev_timer *w, int revents);
 static void mlvpn_rtun_check_timeout(EV_P_ ev_timer *w, int revents);
+static void mlvpn_rtun_write_check(EV_P_ ev_check *w, int revents);
+//static void mlvpn_rtun_write_idle(EV_P_ ev_idle *w, int revents);
 static void mlvpn_rtun_send_keepalive(ev_tstamp now, mlvpn_tunnel_t *t);
 static void mlvpn_rtun_send_disconnect(mlvpn_tunnel_t *t);
-static int mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf);
+static int mlvpn_rtun_send(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt);
 static void mlvpn_rtun_resend(struct resend_data *d);
 static void mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn, int len);
 static void mlvpn_rtun_send_auth(mlvpn_tunnel_t *t);
@@ -185,11 +222,10 @@ static void mlvpn_update_status();
 static int mlvpn_rtun_bind(mlvpn_tunnel_t *t);
 static void update_process_title();
 static void mlvpn_tuntap_init();
-static void mlvpn_rtun_choose(EV_P_ ev_timer *w, int revents);
+static void mlvpn_rtun_choose(mlvpn_tunnel_t *rtun);//EV_P_ ev_timer *w, int revents);
 static int
 mlvpn_protocol_read(mlvpn_tunnel_t *tun,
-                    mlvpn_pkt_t *rawpkt,
-                    mlvpn_pkt_t *decap_pkt);
+                    mlvpn_pkt_t *pkt);
 
 
 static void
@@ -281,13 +317,12 @@ void mlvpn_rtun_tick(mlvpn_tunnel_t *tun) {
 /* Inject the packet to the tuntap device (real network) */
 void mlvpn_rtun_inject_tuntap(mlvpn_pkt_t *pkt)
 {
-    mlvpn_pkt_t *tuntap_pkt = mlvpn_pktbuffer_write(tuntap.sbuf);
-    tuntap_pkt->len = pkt->len;
-    memcpy(tuntap_pkt->data, pkt->data, tuntap_pkt->len);
-    /* Send the packet back into the LAN */
-    if (!ev_is_active(&tuntap.io_write)) {
-        ev_io_start(EV_A_ &tuntap.io_write);
-    }
+  MLVPN_TAILQ_INSERT_HEAD(&tuntap.sbuf, pkt);
+//  mlvpn_tuntap_write(&tuntap, pkt);
+  /* Send the packet back into the LAN */
+  if (!ev_is_active(&tuntap.io_write)) {
+    ev_io_start(EV_A_ &tuntap.io_write);
+  }
 }
 
 
@@ -350,11 +385,6 @@ mlvpn_loss_update(mlvpn_tunnel_t *tun, uint64_t seq)
   }
 }
 
-static void
-mlvpn_rtun_recv_data(mlvpn_tunnel_t *tun, mlvpn_pkt_t *inpkt)
-{
-  mlvpn_reorder_insert( tun, inpkt );
-}
 
 
 /* read from the rtunnel => write directly to the tap send buffer */
@@ -365,32 +395,34 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
     ssize_t len;
     struct sockaddr_storage clientaddr;
     socklen_t addrlen = sizeof(clientaddr);
-    mlvpn_pkt_t pkt;
-    len = recvfrom(tun->fd, pkt.data,
-                   sizeof(pkt.data),
+    mlvpn_pkt_t *pkt=mlvpn_pkt_get();
+    len = recvfrom(tun->fd, &(pkt->p),
+                   sizeof(pkt->p),
                    MSG_DONTWAIT, (struct sockaddr *)&clientaddr, &addrlen);
     if (len < 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             log_warn("net", "%s read error", tun->name);
             mlvpn_rtun_status_down(tun);
         }
+        mlvpn_pkt_release(pkt);
     } else if (len == 0) {
         log_info("protocol", "%s peer closed the connection", tun->name);
+        mlvpn_pkt_release(pkt);
     } else {
-        pkt.len = len;
-        mlvpn_pkt_t decap_pkt;
+        pkt->len=len; // stamp the wire length
 
         /* validate the received packet */
-        if (mlvpn_protocol_read(tun, &pkt, &decap_pkt) < 0) {
-            return;
+        if (mlvpn_protocol_read(tun, pkt) < 0) {
+          mlvpn_pkt_release(pkt);
+          return;
         }
 
         tun->recvbytes += len;
         tun->recvpackets += 1;
-        tun->bm_data += decap_pkt.len;
+        tun->bm_data += pkt->p.len;
         if (tun->quota) {
-          if (tun->permitted > (len + OVERHEAD)) {
-            tun->permitted -= (len + OVERHEAD);
+          if (tun->permitted > (len + PKTHDRSIZ(pkt->p)+IP4_UDP_OVERHEAD)) {
+            tun->permitted -= (len + PKTHDRSIZ(pkt->p)+IP4_UDP_OVERHEAD);
           } else {
             tun->permitted = 0;
           }
@@ -404,6 +436,8 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
             if (mlvpn_options.cleartext_data && tun->status >= MLVPN_AUTHOK) {
                 log_warnx("protocol", "%s rejected non authenticated connection",
                     tun->name);
+                mlvpn_rtun_status_down(tun);
+                mlvpn_pkt_release(pkt);
                 return;
             }
             char clienthost[NI_MAXHOST];
@@ -421,18 +455,19 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
                 memcpy(tun->addrinfo->ai_addr, &clientaddr, addrlen);
             }
         }
-        log_debug("net", "< %s recv %d bytes (type=%d, seq=%"PRIu64", reorder=%d)",
-            tun->name, (int)len, decap_pkt.type, decap_pkt.seq, decap_pkt.reorder);
+        log_debug("net", "< %s recv %d bytes (size=%d, type=%d, seq=%"PRIu64", reorder=%d)",
+                  tun->name, (int)len, pkt->p.len, pkt->p.type, pkt->p.data_seq, pkt->p.reorder);
 
-        if (decap_pkt.type == MLVPN_PKT_DATA || decap_pkt.type == MLVPN_PKT_DATA_RESEND) {
+        if (pkt->p.type == MLVPN_PKT_DATA || pkt->p.type == MLVPN_PKT_DATA_RESEND) {
             if (tun->status >= MLVPN_AUTHOK) {
               mlvpn_rtun_tick(tun);
-              mlvpn_rtun_recv_data(tun, &decap_pkt);
+              mlvpn_reorder_insert( tun, pkt );
             } else {
                 log_debug("protocol", "%s ignoring non authenticated packet",
                     tun->name);
+                mlvpn_pkt_release(pkt);
             }
-        } else if (decap_pkt.type == MLVPN_PKT_KEEPALIVE &&
+        } else if (pkt->p.type == MLVPN_PKT_KEEPALIVE &&
                 tun->status >= MLVPN_AUTHOK) {
             log_debug("protocol", "%s keepalive received", tun->name);
             mlvpn_rtun_tick(tun);
@@ -443,30 +478,35 @@ mlvpn_rtun_read(EV_P_ ev_io *w, int revents)
                 mlvpn_rtun_send_keepalive(tun->last_keepalive_ack, tun);
             }
             uint64_t bw=0;
-            sscanf(decap_pkt.data,"%lu", &bw);
+            sscanf(pkt->p.data,"%lu", &bw);
             if (bw>0) {
-              tun->bandwidth_out=bw;
+              tun->bandwidth_out=(((double)tun->bandwidth_out * 9.0) + (double)bw)/10.0;
             }
-        } else if (decap_pkt.type == MLVPN_PKT_DISCONNECT &&
+            mlvpn_pkt_release(pkt);
+        } else if (pkt->p.type == MLVPN_PKT_DISCONNECT &&
                 tun->status >= MLVPN_AUTHOK) {
             log_info("protocol", "%s disconnect received", tun->name);
             mlvpn_rtun_status_down(tun);
-        } else if (decap_pkt.type == MLVPN_PKT_AUTH ||
-                decap_pkt.type == MLVPN_PKT_AUTH_OK) {
+            mlvpn_pkt_release(pkt);
+        } else if (pkt->p.type == MLVPN_PKT_AUTH ||
+                pkt->p.type == MLVPN_PKT_AUTH_OK) {
           // recieve any quota info, if there is any
-          if (decap_pkt.len > 2) {
+          if (pkt->p.len > 2) {
             int64_t perm=0;
-            sscanf(&(decap_pkt.data[2]),"%ld", &perm);
+            sscanf(&(pkt->p.data[2]),"%ld", &perm);
             if (perm > tun->permitted) tun->permitted=perm;
           }
           mlvpn_rtun_send_auth(tun);
-        } else if (decap_pkt.type == MLVPN_PKT_RESEND &&
+          mlvpn_pkt_release(pkt);
+        } else if (pkt->p.type == MLVPN_PKT_RESEND &&
                 tun->status >= MLVPN_AUTHOK) {
-          mlvpn_rtun_resend((struct resend_data *)decap_pkt.data);
+          mlvpn_rtun_resend((struct resend_data *)pkt->p.data);
+          mlvpn_pkt_release(pkt);
         } else {
           if (tun->status >= MLVPN_AUTHOK) {
-            log_warnx("protocol", "Unknown packet type %d", decap_pkt.type);
+            log_warnx("protocol", "Unknown packet type %d", pkt->p.type);
           }
+          mlvpn_pkt_release(pkt);
         }
     }
 }
@@ -485,47 +525,37 @@ float mlvpn_loss_unpack(mlvpn_tunnel_t *t, uint16_t v)
 
 
 static int
-mlvpn_protocol_read(
-    mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt,
-    mlvpn_pkt_t *decap_pkt)
+mlvpn_protocol_read(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
 {
+    mlvpn_proto_t *proto=&pkt->p;
     unsigned char nonce[crypto_NONCEBYTES];
     int ret;
     uint16_t rlen;
-    mlvpn_proto_t proto;
     uint64_t now64 = mlvpn_timestamp64(ev_now(EV_DEFAULT_UC));
     /* Overkill */
-    memset(&proto, 0, sizeof(proto));
-    memset(decap_pkt, 0, sizeof(*decap_pkt));
-
     /* pkt->data contains mlvpn_proto_t struct */
-    if (pkt->len > sizeof(pkt->data) || pkt->len > sizeof(proto) ||
-            pkt->len < (PKTHDRSIZ(proto))) {
+    if (pkt->len > sizeof(*pkt) || pkt->len < (PKTHDRSIZ(pkt->p))) {
         log_warnx("protocol", "%s received invalid packet of %d bytes",
             tun->name, pkt->len);
         goto fail;
     }
-    memcpy(&proto, pkt->data, pkt->len);
-    rlen = be16toh(proto.len);
-    if (rlen == 0 || rlen > sizeof(proto.data)) {
+    rlen = be16toh(pkt->p.len);
+    if (/*rlen == 0 ||*/ rlen > sizeof(proto->data)) {
         log_warnx("protocol", "%s invalid packet size: %d", tun->name, rlen);
         goto fail;
     }
-
-    proto.tun_seq = be64toh(proto.tun_seq);
-    proto.timestamp = be16toh(proto.timestamp);
-    proto.timestamp_reply = be16toh(proto.timestamp_reply);
-    proto.flow_id = be32toh(proto.flow_id);
+    proto->tun_seq = be64toh(proto->tun_seq);
+    proto->timestamp = be16toh(proto->timestamp);
+    proto->timestamp_reply = be16toh(proto->timestamp_reply);
+    proto->flow_id = be32toh(proto->flow_id);
     /* now auth the packet using libsodium before further checks */
 #ifdef ENABLE_CRYPTO
-    if (mlvpn_options.cleartext_data && (proto.flags == MLVPN_PKT_DATA || proto.flags == MLVPN_PKT_DATA_RESEND)) {
-        memcpy(decap_pkt->data, &proto.data, rlen);
-    } else {
+    if (!(mlvpn_options.cleartext_data && (proto->type == MLVPN_PKT_DATA || proto->type == MLVPN_PKT_DATA_RESEND))) {
         sodium_memzero(nonce, sizeof(nonce));
-        memcpy(nonce, &proto.tun_seq, sizeof(proto.tun_seq));
-        memcpy(nonce + sizeof(proto.tun_seq), &proto.flow_id, sizeof(proto.flow_id));
-        if ((ret = crypto_decrypt((unsigned char *)decap_pkt->data,
-                                  (const unsigned char *)&proto.data, rlen,
+        memcpy(nonce, &proto->tun_seq, sizeof(proto->tun_seq));
+        memcpy(nonce + sizeof(proto->tun_seq), &proto->flow_id, sizeof(proto->flow_id));
+        if ((ret = crypto_decrypt((unsigned char *)pkt->p.data,
+                                  (const unsigned char *)&pkt->p.data, rlen,
                                   nonce)) != 0) {
             log_warnx("protocol", "%s crypto_decrypt failed: %d",
                 tun->name, ret);
@@ -533,19 +563,17 @@ mlvpn_protocol_read(
         }
         rlen -= crypto_PADSIZE;
     }
-#else
-    memcpy(decap_pkt->data, &proto.data, rlen);
 #endif
-    decap_pkt->len = rlen;
-    decap_pkt->type = proto.flags;
-    if (proto.version >= 1) {
-        decap_pkt->reorder = proto.reorder;
-        decap_pkt->seq = be64toh(proto.data_seq);
-        mlvpn_loss_update(tun, proto.tun_seq);
+    proto->len = rlen; // record the length of the data in the packet (which may
+                       // have changed due to decryption, and will anyway now be
+                       // LE, not BE)
+    if (proto->version >= 1) {
+        proto->data_seq = be64toh(proto->data_seq);
+        mlvpn_loss_update(tun, proto->tun_seq);
                          // use the TUN seq number to
                          // calculate loss
-        if (proto.version >=2) {
-          tun->sent_loss=mlvpn_loss_unpack(tun, proto.sent_loss);
+        if (proto->version >=2) {
+          tun->sent_loss=mlvpn_loss_unpack(tun, proto->sent_loss);
         } else {
           tun->sent_loss=0;
         }
@@ -553,16 +581,17 @@ mlvpn_protocol_read(
 //          tun->last_seen=decap_pkt->seq;
 //        }
     } else {
-        decap_pkt->reorder = 0;
-        decap_pkt->seq = 0;
+        proto->reorder = 0;
+        proto->data_seq = 0;
+        proto->tun_seq = 0;
     }
-    if (proto.timestamp != (uint16_t)-1) {
-        tun->saved_timestamp = proto.timestamp;
+    if (proto->timestamp != (uint16_t)-1) {
+        tun->saved_timestamp = proto->timestamp;
         tun->saved_timestamp_received_at = now64;
     }
-    if (proto.timestamp_reply != (uint16_t)-1) {
+    if (proto->timestamp_reply != (uint16_t)-1) {
         uint16_t now16 = mlvpn_timestamp16(now64);
-        double R = mlvpn_timestamp16_diff(now16, proto.timestamp_reply);
+        double R = mlvpn_timestamp16_diff(now16, proto->timestamp_reply);
                   if ((R < 5000) && (tun->seq_vect==(uint64_t)-1)) {  /* ignore large values, e.g. server
                                                                        * was Ctrl-Zed, and while there
                                                                        * are losses, the values will be wrong! */
@@ -593,84 +622,77 @@ void set_reorder(mlvpn_pkt_t *pkt)
     // should packet inspect, and only re-order TCP packets !
     // 17 - UDP
     // 6 - TCP
-    if ((pkt->type == MLVPN_PKT_DATA || pkt->type == MLVPN_PKT_DATA_RESEND) && pkt->data[9]==6) {
-      pkt->reorder = 1;
+    if ((pkt->p.type == MLVPN_PKT_DATA || pkt->p.type == MLVPN_PKT_DATA_RESEND) && pkt->p.data[9]==6) {
+      pkt->p.reorder = 1;
     } else {
-      pkt->reorder = 0;
+      pkt->p.reorder = 0;
     }
 }
 
 static int
-mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
+mlvpn_rtun_send(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
 {
     unsigned char nonce[crypto_NONCEBYTES];
     ssize_t ret;
     size_t wlen;
-    mlvpn_proto_t proto;
-    memset(&proto, 0, sizeof(proto));
-    mlvpn_pkt_t *pkt = mlvpn_pktbuffer_read(pktbuf);
-
+    mlvpn_proto_t *proto=&(pkt->p);
+    mlvpn_proto_t tmp_proto;
     set_reorder(pkt);
 
-    // NB, the 'proto.data_seq' should be removed !
-    if (pkt->type==MLVPN_PKT_DATA_RESEND) {
-      proto.data_seq = pkt->seq;
-    } else {
-      if (pkt->reorder) {
-        proto.data_seq = data_seq++;
+    if (pkt->p.type!=MLVPN_PKT_DATA_RESEND) {
+      if (pkt->p.reorder) {
+        proto->data_seq = data_seq;
       } else {
-        proto.data_seq = 0;
+        proto->data_seq = 0;
       }
-      pkt->seq=proto.data_seq;
     }
-    
-    wlen = PKTHDRSIZ(proto) + pkt->len;
 
+    wlen = PKTHDRSIZ(pkt->p) + pkt->p.len;
 
-    proto.len = pkt->len;
-    proto.flags = pkt->type;
+    if (tun->old_pkts[tun->seq % PKTBUFSIZE]) {
+      mlvpn_pkt_release(tun->old_pkts[tun->seq % PKTBUFSIZE]);
+    }
+    tun->old_pkts[tun->seq % PKTBUFSIZE]=pkt;
 
 // we should still use this to measure packet loss even if they are UDP packets
 // tun seq incrememts even if we resend
-    tun->old_pkts_n[tun->seq % PKTBUFSIZE]=tun->seq;
-    tun->old_pkts[tun->seq % PKTBUFSIZE]=pkt;
-    proto.tun_seq = tun->seq++;
+    proto->tun_seq = tun->seq;
 
-    proto.flow_id = tun->flow_id;
-    proto.version = MLVPN_PROTOCOL_VERSION;
-    proto.reorder = pkt->reorder;
-    proto.sent_loss=mlvpn_loss_pack(tun);
+    proto->flow_id = tun->flow_id;
+    proto->version = MLVPN_PROTOCOL_VERSION;
+    proto->sent_loss=mlvpn_loss_pack(tun);
 
 #ifdef ENABLE_CRYPTO
-    if (mlvpn_options.cleartext_data && (pkt->type == MLVPN_PKT_DATA || pkt->type == MLVPN_PKT_DATA_RESEND)) {
-        memcpy(&proto.data, &pkt->data, pkt->len);
-    } else {
-        if (wlen + crypto_PADSIZE > sizeof(proto.data)) {
+    if (!(mlvpn_options.cleartext_data && (pkt->p.type == MLVPN_PKT_DATA || pkt->p.type == MLVPN_PKT_DATA_RESEND))) {
+      memcpy(&tmp_proto, proto, sizeof(tmp_proto));
+        if (wlen + crypto_PADSIZE > sizeof(proto->data)) {
             log_warnx("protocol", "%s packet too long: %u/%d (packet=%d)",
                 tun->name,
                 (unsigned int)wlen + crypto_PADSIZE,
-                (unsigned int)sizeof(proto.data),
-                pkt->len);
+                (unsigned int)sizeof(proto->data),
+                pkt->p.len);
             return -1;
         }
         sodium_memzero(nonce, sizeof(nonce));
-        memcpy(nonce, &proto.tun_seq, sizeof(proto.tun_seq));
-        memcpy(nonce + sizeof(proto.tun_seq), &proto.flow_id, sizeof(proto.flow_id));
-        if ((ret = crypto_encrypt((unsigned char *)&proto.data,
-                                  (const unsigned char *)&pkt->data, pkt->len,
+        memcpy(nonce, &proto->tun_seq, sizeof(proto->tun_seq));
+        memcpy(nonce + sizeof(proto->tun_seq), &proto->flow_id, sizeof(proto->flow_id));
+        if ((ret = crypto_encrypt((unsigned char *)&proto->data,
+                                  (const unsigned char *)&proto->data, proto->len,
                                   nonce)) != 0) {
             log_warnx("protocol", "%s crypto_encrypt failed: %d incorrect password?",
                 tun->name, (int)ret);
             return -1;
         }
-        proto.len += crypto_PADSIZE;
+        proto->len += crypto_PADSIZE;
         wlen += crypto_PADSIZE;
-    }
-#else
-    memcpy(&proto.data, &pkt->data, pkt->len);
+    } else
 #endif
+    {
+      memcpy(&tmp_proto,proto,PKTHDRSIZ(tmp_proto));
+    }
 
-    
+    pkt->len=wlen;
+
 // significant time can have elapsed, so maybe better use the current time
     // rather than... uint64_t now64 = mlvpn_timestamp64(ev_now(EV_DEFAULT_UC));
     uint64_t now64 = mlvpn_timestamp64(ev_time());
@@ -679,41 +701,62 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
       if (now64 - tun->saved_timestamp_received_at < 1000 ) {
         /* send "corrected" timestamp advanced by how long we held it */
         /* Cast to uint16_t there intentional */
-        proto.timestamp_reply = tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at);
+        proto->timestamp_reply = tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at);
         tun->saved_timestamp = -1;
         tun->saved_timestamp_received_at = 0;
       } else {
-        proto.timestamp_reply = -1;
+        proto->timestamp_reply = -1;
         log_debug("rtt","(%s) No timestamp added, time too long! (%lu > 1000)",tun->name, tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at ));
       }
     } else {
-      proto.timestamp_reply = -1;
+      proto->timestamp_reply = -1;
       log_debug("rtt","(%s) No timestamp added, time too long! (%lu > 1000)",tun->name, tun->saved_timestamp + (now64 - tun->saved_timestamp_received_at ));
     }
 
-    proto.timestamp = mlvpn_timestamp16(now64);
-    proto.len = htobe16(proto.len);
-    proto.tun_seq = htobe64(proto.tun_seq);
-    proto.data_seq = htobe64(proto.data_seq);
-    proto.flow_id = htobe32(proto.flow_id);
-    proto.timestamp = htobe16(proto.timestamp);
-    proto.timestamp_reply = htobe16(proto.timestamp_reply);
-    ret = sendto(tun->fd, &proto, wlen, MSG_DONTWAIT,
+    proto->timestamp = mlvpn_timestamp16(now64);
+    proto->len = htobe16(proto->len);
+    proto->tun_seq = htobe64(proto->tun_seq);
+    proto->data_seq = htobe64(proto->data_seq);
+    proto->flow_id = htobe32(proto->flow_id);
+    proto->timestamp = htobe16(proto->timestamp);
+    proto->timestamp_reply = htobe16(proto->timestamp_reply);
+    ret = sendto(tun->fd, proto, wlen, MSG_DONTWAIT,
                  tun->addrinfo->ai_addr, tun->addrinfo->ai_addrlen);
+#ifdef ENABLE_CRYPTO
+    if (!(mlvpn_options.cleartext_data && (pkt->p.type == MLVPN_PKT_DATA || pkt->p.type == MLVPN_PKT_DATA_RESEND))) {
+      memcpy(proto,&tmp_proto,sizeof(tmp_proto));
+    } else
+#endif
+    {
+      memcpy(proto,&tmp_proto,PKTHDRSIZ(tmp_proto));
+    }
+
     if (ret < 0)
     {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
-          if (pkt->type!=MLVPN_PKT_AUTH) {
+          if (pkt->p.type!=MLVPN_PKT_AUTH) {
             log_warn("net", "%s write error", tun->name);
             mlvpn_rtun_status_down(tun);
           } // dont report AUTH packet loss, as we know that !
+        } else {
+          fatalx("lost write!");
         }
     } else {
+      // we are here when we succeed to send the packet
+      
+      tun->seq++;
+      if (pkt->p.type!=MLVPN_PKT_DATA_RESEND) {
+        if (pkt->p.reorder) data_seq++;
+      }
+//      if (pkt->p.reorder) {
+//        printf("Sending data seq %lu on %s (tun seq %lu)\n", pkt->p.data_seq, tun->name, pkt->p.tun_seq);
+//      }
+      
         tun->sentpackets++;
         tun->sentbytes += ret;
         if (tun->quota) {
-          if (tun->permitted > (ret + OVERHEAD)) {
-            tun->permitted -= (ret + OVERHEAD);
+          if (tun->permitted > (ret + PKTHDRSIZ(pkt->p)+IP4_UDP_OVERHEAD)) {
+            tun->permitted -= (ret + PKTHDRSIZ(pkt->p)+IP4_UDP_OVERHEAD);
           } else {
             tun->permitted = 0;
           }
@@ -725,31 +768,106 @@ mlvpn_rtun_send(mlvpn_tunnel_t *tun, circular_buffer_t *pktbuf)
                 tun->name, (int)ret, (unsigned int)wlen);
         } else {
             log_debug("net", "> %s sent %d bytes (size=%d, type=%d, seq=%"PRIu64", reorder=%d)",
-                tun->name, (int)ret, pkt->len, pkt->type, pkt->seq, pkt->reorder);
+                      tun->name, (int)ret, be16toh(pkt->p.len), pkt->p.type, be64toh(pkt->p.data_seq), pkt->p.reorder);
         }
     }
 
-    if (ev_is_active(&tun->io_write) && mlvpn_cb_is_empty(pktbuf)) {
-        ev_io_stop(EV_A_ &tun->io_write);
-    }
+//    if (ev_is_active(&tun->io_write) && mlvpn_cb_is_empty(pktbuf)) {
+//        ev_io_stop(EV_A_ &tun->io_write);
+//    }
     return ret;
 }
 
 
 static void
+mlvpn_rtun_do_send(mlvpn_tunnel_t *tun)
+{
+  ev_tstamp now = ev_now(EV_DEFAULT_UC);
+  ev_tstamp diff = now - tun->last_adjust;
+  
+  int len=0;
+  // if there is hp stuff for us - SEND IT !
+  double b=tun->bytes_per_sec * diff;
+  if (tun->srtt_raw > srtt_av * 2) {
+    b*=0.95;
+  }
+  if (tun->sent_loss) {
+    b*=0.95;
+  }
+    
+  if ( tun->bytes_since_adjust < b ) {
+    if (! MLVPN_TAILQ_EMPTY(&tun->hpsbuf)) {
+      mlvpn_pkt_t *pkt=MLVPN_TAILQ_POP_LAST(&tun->hpsbuf);
+      len = mlvpn_rtun_send(tun, pkt);
+      if (len<0) {
+        MLVPN_TAILQ_INSERT_TAIL(&tun->hpsbuf,pkt);
+      }
+    } else {
+      mlvpn_rtun_choose(tun);//EV_P_ ev_timer *w, int revents);  
+      if (! MLVPN_TAILQ_EMPTY(&tun->sbuf)) {
+        mlvpn_pkt_t *pkt=MLVPN_TAILQ_POP_LAST(&tun->sbuf);
+        len = mlvpn_rtun_send(tun, pkt);
+        if (len<0) {
+          MLVPN_TAILQ_INSERT_TAIL(&tun->sbuf,pkt);
+        }
+      }
+    }
+    if (ev_is_active(&tun->check_ev)) {
+      ev_check_stop(EV_A_ &tun->check_ev);
+//      ev_idle_stop(EV_A_ &tun->idle_ev);
+    }
+  } else {
+// we're too soon, use a checker to wait for the right time
+    if (!ev_is_active(&tun->check_ev)) {
+      ev_check_start(EV_A_ &tun->check_ev);
+//      ev_idle_start(EV_A_ &tun->idle_ev);
+    }
+  }
+  
+  if (len>0) {
+    // len + the UDP  overhead ??
+    tun->bytes_since_adjust+=len+ IP4_UDP_OVERHEAD;
+    tun->busy_writing++;
+    if (!ev_is_active(&tun->io_write)) {
+      ev_io_start(EV_A_ &tun->io_write);
+    }
+  } else { // nothing sent, so disable the write events
+    if (ev_is_active(&tun->io_write)) {
+      ev_io_stop(EV_A_ &tun->io_write);
+    }
+  }
+  
+}
+static void
 mlvpn_rtun_write(EV_P_ ev_io *w, int revents)
 {
-    mlvpn_tunnel_t *tun = w->data;
-
-    if (! mlvpn_cb_is_empty(tun->hpsbuf)) {
-        mlvpn_rtun_send(tun, tun->hpsbuf);
-    }
-
-    if (! mlvpn_cb_is_empty(tun->sbuf)) {
-        mlvpn_rtun_send(tun, tun->sbuf);
-    }
-
+  mlvpn_tunnel_t *tun = w->data;
+  if (tun->busy_writing) {
+    tun->busy_writing--;
+    mlvpn_rtun_do_send(tun);
+  }
+  
 }
+
+static void
+mlvpn_rtun_write_timeout(EV_P_ ev_timer *w, int revents)
+{
+  mlvpn_tunnel_t *tun = w->data;
+  if (!tun->busy_writing) mlvpn_rtun_do_send(tun);
+}
+
+static void
+mlvpn_rtun_write_check(EV_P_ ev_check *w, int revents)
+{
+  mlvpn_tunnel_t *tun = w->data;
+  if (!tun->busy_writing) mlvpn_rtun_do_send(tun);
+}
+
+//static void
+//mlvpn_rtun_write_idle(EV_P_ ev_idle *w, int revents)
+//{
+//}
+
 
 mlvpn_tunnel_t *
 mlvpn_rtun_new(const char *name,
@@ -838,8 +956,8 @@ mlvpn_rtun_new(const char *name,
         strlcpy(new->destaddr, destaddr, sizeof(new->destaddr));
     if (destport)
         strlcpy(new->destport, destport, sizeof(new->destport));
-    new->sbuf = mlvpn_pktbuffer_init(PKTBUFSIZE);
-    new->hpsbuf = mlvpn_pktbuffer_init(PKTBUFSIZE);
+    mlvpn_pkt_list_init(&new->sbuf, PKTBUFSIZE);
+    mlvpn_pkt_list_init(&new->hpsbuf, PKTBUFSIZE);
     mlvpn_rtun_tick(new);
     new->timeout = timeout;
     new->next_keepalive = 0;
@@ -852,11 +970,20 @@ mlvpn_rtun_new(const char *name,
     ev_timer_init(&new->io_timeout, mlvpn_rtun_check_timeout,
         0., MLVPN_IO_TIMEOUT_DEFAULT);
     ev_timer_start(EV_A_ &new->io_timeout);
-
+    new->check_ev.data = new;
+    ev_check_init(&new->check_ev, mlvpn_rtun_write_check);
+//    new->idle_ev.data = new;
+//    ev_idle_init(&new->idle_ev, mlvpn_rtun_write_idle);
     new->send_timer.data = new;
-    ev_timer_init(&new->send_timer, &mlvpn_rtun_choose, 0., 0.01);
+    ev_timer_init(&new->send_timer, &mlvpn_rtun_write_timeout, 0., 0.01);
     ev_timer_start(EV_A_ &new->send_timer);
 
+    new->last_adjust=ev_now(EV_DEFAULT_UC);
+    new->bytes_since_adjust=0;
+    new->bytes_per_sec=0;
+    new->busy_writing=0;
+
+    memset(&new->old_pkts, 0, sizeof(new->old_pkts));
     update_process_title();
     return new;
 }
@@ -879,8 +1006,12 @@ mlvpn_rtun_drop(mlvpn_tunnel_t *t)
                 free(tmp->name);
             if (tmp->addrinfo)
                 freeaddrinfo(tmp->addrinfo);
-            mlvpn_pktbuffer_free(tmp->sbuf);
-            mlvpn_pktbuffer_free(tmp->hpsbuf);
+            while (!MLVPN_TAILQ_EMPTY(&tmp->sbuf)) {
+              mlvpn_pkt_release(MLVPN_TAILQ_POP_LAST(&tmp->sbuf));
+            }
+            while (!MLVPN_TAILQ_EMPTY(&tmp->hpsbuf)) {
+              mlvpn_pkt_release(MLVPN_TAILQ_POP_LAST(&tmp->hpsbuf));
+            }
             /* Safety */
             tmp->name = NULL;
             break;
@@ -890,95 +1021,73 @@ mlvpn_rtun_drop(mlvpn_tunnel_t *t)
 }
 
 
-static void
-mlvpn_rtun_recalc_weight_srtt()
-{
-    mlvpn_tunnel_t *t;
-    double totalsrtt=0;
-
-    LIST_FOREACH(t, &rtuns, entries)
-    {
-      totalsrtt+=t->srtt;
-    }
-    double totalf=0;
-      
-    LIST_FOREACH(t, &rtuns, entries)
-    {
-      if (t->srtt > 0)  {
-        totalf += totalsrtt / t->srtt;
-      }
-    }
-    LIST_FOREACH(t, &rtuns, entries)
-    {
-      double st=t->srtt;
-      if (st > 0)  {
-        // should be 1 / (t->srtt / totalsrtt)
-        // e.g. (1 / (srtt / totalsrtt)) * (100 / totalf)
-        mlvpn_rtun_set_weight(t, ((totalsrtt * 100) / (st * totalf)));
-        if (t->weight < 1) mlvpn_rtun_set_weight(t,1);
-        if (t->weight > 100) mlvpn_rtun_set_weight(t,100);
-        log_debug("wrr", "%s weight = %f%%", t->name, t->weight);
-      } 
-    }
-}
-
-
 
 /* Based on tunnel bandwidth, with priority compute a "weight" value
  * to balance correctly the round robin rtun_choose.
  */
 static void
-mlvpn_rtun_recalc_weight_prio()
+mlvpn_rtun_recalc_weight()
 {
-  if (bandwidth<=0) {
-// When there is no bandwdith, anything that comes through, share out in
-// proportion to srtt - this should give us the fastest pickup.
-    return mlvpn_rtun_recalc_weight_srtt();
+  mlvpn_tunnel_t *t;
+  double bwneeded=bandwidth * 1.5;
+  if (bwneeded < 1000) bwneeded=1000;
+  double bwavailable=0;
+
+  // reset all tunnels
+  LIST_FOREACH(t, &rtuns, entries) {
+    if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*BANDWIDTHCALCTIME)) && (t->status == MLVPN_AUTHOK)) {
+      mlvpn_rtun_set_weight(t, bwneeded/50);
+    } else {
+      mlvpn_rtun_set_weight(t, 0);
+    }
+  }
+  // set up for non quota tunnels
+  LIST_FOREACH(t, &rtuns, entries) {
+    if ((t->quota == 0) && (t->status == MLVPN_AUTHOK)) {
+
+      double lt=(double)t->loss_tolerence/2.0; // aim at 1/2 the loss at which we will
+      // declair the tunnel lossy.
+      double part = (((lt-t->sent_loss)/lt));
+      
+      if (part<0) part=0;
+      // effectively, the link is lossy, and will be marked as such later, here,
+    // simply remove the weight from the link.
+      
+      double bw=bwneeded - bwavailable;
+      if (t->bandwidth_max*part > bw) {
+          mlvpn_rtun_set_weight(t, (bw*part));
+          bwavailable+=bw*part;
+      } else {
+        mlvpn_rtun_set_weight(t, (t->bandwidth_max*part));
+        bwavailable+=(t->bandwidth_max*part);
+      }
+    }
   }
 
-    
-  mlvpn_tunnel_t *t;
-  double bwneeded=bandwidth * 5 /** (mlvpn_cb_length(send_buffer)/100)*/; /* do we need headroom e.g. * 1.5*/;
-  double bwavailable=0;
   LIST_FOREACH(t, &rtuns, entries) {
-    if (t->bandwidth == 0) // bail out, we need to know the bandwidths to share
-      return mlvpn_rtun_recalc_weight_srtt();
-
-    if (bwavailable > 2 * bwneeded) {
-//      bandwidth_max = (realBW * 8)/1000, and we want it for the number of
-//      seconds between bandwidth recalculations 
-        if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*BANDWIDTHCALCTIME)) && (t->status == MLVPN_AUTHOK)) {
-          mlvpn_rtun_set_weight(t, bwneeded/50);
-        } else {
-          mlvpn_rtun_set_weight(t, 0);
-        }
-        continue;
-    }
+    if ((t->quota != 0) && (t->status == MLVPN_AUTHOK)) {
     
-    double lt=(double)t->loss_tolerence/2.0; // aim at 1/2 the loss at which we will
+      double lt=(double)t->loss_tolerence/2.0; // aim at 1/2 the loss at which we will
                                      // declair the tunnel lossy.
-    double part = (((lt-t->sent_loss)/lt));
+      double part = (((lt-t->sent_loss)/lt));
 
-    if (part<0) part=0;
-    // effectively, the link is lossy, and will be marked as such later, here,
-    // simply remove the weight from the link.
+      if (part<0) part=0;
+      // effectively, the link is lossy, and will be marked as such later, here,
+      // simply remove the weight from the link.
+      
+      // Should we limit to e.g. 0.8 of the bandwidth here?
 
-    // Should we limit to e.g. 0.8 of the bandwidth here?
-    if ((t->quota == 0) && (t->status == MLVPN_AUTHOK)) {
-      mlvpn_rtun_set_weight(t, (t->bandwidth*part));
-      bwavailable+=(t->bandwidth*part);
-    } else {
       double bw=bwneeded - bwavailable;
-      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth_max*125*BANDWIDTHCALCTIME)) && (t->status == MLVPN_AUTHOK)) {
-        if (t->bandwidth*part > bw) {
+      if (bw>0 && (t->quota==0 || t->permitted > (t->bandwidth_max*128*BANDWIDTHCALCTIME)) && (t->status == MLVPN_AUTHOK)) {
+        if (t->bandwidth_max*part > bw) {
           mlvpn_rtun_set_weight(t, (bw*part));
           bwavailable+=bw*part;
         } else {
-          mlvpn_rtun_set_weight(t, (t->bandwidth*part));
-          bwavailable+=(t->bandwidth*part);
+          mlvpn_rtun_set_weight(t, (t->bandwidth_max*part));
+          bwavailable+=(t->bandwidth_max*part);
         }
       } else {
-        if ((t->quota==0 || t->permitted > (t->bandwidth_max*125*BANDWIDTHCALCTIME)) && (t->status == MLVPN_AUTHOK)) {
+        if ((t->quota==0 || t->permitted > (t->bandwidth_max*128*BANDWIDTHCALCTIME)) && (t->status == MLVPN_AUTHOK)) {
           mlvpn_rtun_set_weight(t, bwneeded/50);
         } else {
           mlvpn_rtun_set_weight(t, 0);
@@ -986,20 +1095,7 @@ mlvpn_rtun_recalc_weight_prio()
       }
     }
   }
-  
-  if (bwavailable==0) {
-    return mlvpn_rtun_recalc_weight_srtt();
-  }
 }
-
-
-
-static void
-mlvpn_rtun_recalc_weight()
-{
-  mlvpn_rtun_recalc_weight_prio();
-}
-
 
 static int
 mlvpn_rtun_bind(mlvpn_tunnel_t *t)
@@ -1144,6 +1240,7 @@ mlvpn_rtun_start(mlvpn_tunnel_t *t)
     ev_io_set(&t->io_read, fd, EV_READ);
     ev_io_set(&t->io_write, fd, EV_WRITE);
     ev_io_start(EV_A_ &t->io_read);
+//    ev_io_start(EV_A_ &t->io_write); // lets just leave it running
     t->io_timeout.repeat = MLVPN_IO_TIMEOUT_DEFAULT;
     return 0;
 error:
@@ -1225,7 +1322,7 @@ mlvpn_tunnel_t *best_quick_tun(mlvpn_tunnel_t *not)
         t!=not &&
 //        t->sent_loss==0 &&
         t->sent_loss<(double)t->loss_tolerence/4.0 &&
-        (!best || mlvpn_cb_length(t->hpsbuf) < mlvpn_cb_length(best->hpsbuf)))
+        (!best || MLVPN_TAILQ_LENGTH(&t->hpsbuf) < MLVPN_TAILQ_LENGTH(&best->hpsbuf)))
       best=t;
   }
   return best;
@@ -1263,6 +1360,13 @@ mlvpn_rtun_status_up(mlvpn_tunnel_t *t)
     }
     mlvpn_free_script_env(env);
     update_process_title();
+
+    while (!MLVPN_TAILQ_EMPTY(&t->sbuf)) {
+      mlvpn_pkt_release(MLVPN_TAILQ_POP_LAST(&t->sbuf));
+    }
+    while (!MLVPN_TAILQ_EMPTY(&t->hpsbuf)) {
+      mlvpn_pkt_release(MLVPN_TAILQ_POP_LAST(&t->hpsbuf));
+    }
 }
 
 void
@@ -1280,29 +1384,37 @@ mlvpn_rtun_status_down(mlvpn_tunnel_t *t)
     t->srtt_raw=0;
     t->loss_av=100;
 
+    mlvpn_tunnel_t *tun;
+    LIST_FOREACH(tun, &rtuns, entries) {
+      if (tun->status >= MLVPN_AUTHOK) break;
+    }
+    if (!tun) mlvpn_reorder_reset();
+
     mlvpn_rtun_recalc_weight();
 
     // Resend anything that was in flight !!!!
     // for the hps, lest just try to resend what we know is outstanding
-    while (!mlvpn_cb_is_empty(t->hpsbuf))
+    while (!MLVPN_TAILQ_EMPTY(&t->hpsbuf))
     {
-      mlvpn_pkt_t *old=mlvpn_pktbuffer_read(t->hpsbuf);
+      mlvpn_pkt_t *old=MLVPN_TAILQ_POP_LAST(&t->hpsbuf);
       mlvpn_tunnel_t *tun=best_quick_tun(t);
       if (!tun) break;
-      if (mlvpn_cb_is_full(tun->hpsbuf))
+      if (mlvpn_pkt_list_is_full(&tun->hpsbuf))
         log_warnx("net", "%s high priority buffer: overflow", tun->name);
-      mlvpn_pkt_t *pkt = mlvpn_pktbuffer_write(tun->hpsbuf);
-      memcpy(pkt,old,sizeof(mlvpn_pkt_t));
+      MLVPN_TAILQ_INSERT_HEAD(&tun->hpsbuf, old);
     }
-    mlvpn_pktbuffer_reset(t->sbuf);
-    mlvpn_pktbuffer_reset(t->hpsbuf);
+    // everythign in our send buffer, we'll drop - they will bound to ask for
+    // more, and better they ask for the right things
+    while (!MLVPN_TAILQ_EMPTY(&t->sbuf)) {
+      mlvpn_pkt_release(MLVPN_TAILQ_POP_LAST(&t->sbuf));
+    }
     // for the normal buffer, lets request resends of all possible packets from
     // the last one we recieved
     mlvpn_rtun_request_resend(t, t->seq_last, PKTBUFSIZE);
 
-    if (ev_is_active(&t->io_write)) {
-        ev_io_stop(EV_A_ &t->io_write);
-    }
+//    if (ev_is_active(&t->io_write)) {
+//        ev_io_stop(EV_A_ &t->io_write);
+//    }
 
     mlvpn_update_status();
     if (old_status >= MLVPN_AUTHOK)
@@ -1347,20 +1459,21 @@ mlvpn_rtun_challenge_send(mlvpn_tunnel_t *t)
 {
     mlvpn_pkt_t *pkt;
 
-    if (mlvpn_cb_is_full(t->hpsbuf))
+    if (mlvpn_pkt_list_is_full(&t->hpsbuf))
         log_warnx("net", "%s high priority buffer: overflow", t->name);
 
-    pkt = mlvpn_pktbuffer_write(t->hpsbuf);
-    pkt->data[0] = 'A';
-    pkt->data[1] = 'U';
-    pkt->len = 2;
+    pkt = mlvpn_pkt_get();
+    MLVPN_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
+    pkt->p.data[0] = 'A';
+    pkt->p.data[1] = 'U';
+    pkt->p.len = 2;
 
     // send quota info
     if (t->quota) {
-      pkt->len+=sprintf(&(pkt->data[pkt->len]),"%ld",t->permitted) + 1;
+      pkt->p.len+=sprintf(&(pkt->p.data[pkt->p.len]),"%ld",t->permitted) + 1;
     }
 
-    pkt->type = MLVPN_PKT_AUTH;
+    pkt->p.type = MLVPN_PKT_AUTH;
 
     t->status = MLVPN_AUTHSENT;
     log_debug("protocol", "%s mlvpn_rtun_challenge_send", t->name);
@@ -1379,30 +1492,32 @@ mlvpn_rtun_send_auth(mlvpn_tunnel_t *t)
             mlvpn_rtun_status_up(t); // mark this as up, before trying to send
                                      // somethign on it !
 
-            if (mlvpn_cb_is_full(t->hpsbuf)) {
+            if (mlvpn_pkt_list_is_full(&t->hpsbuf)) {
                 log_warnx("net", "%s high priority buffer: overflow", t->name);
-                mlvpn_cb_reset(t->hpsbuf);
+//                mlvpn_cb_reset(t->hpsbuf); need to do something here?
             }
-            pkt = mlvpn_pktbuffer_write(t->hpsbuf);
-            pkt->data[0] = 'O';
-            pkt->data[1] = 'K';
-            pkt->len = 2;
+            pkt = mlvpn_pkt_get();
+            MLVPN_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
+
+            pkt->p.data[0] = 'O';
+            pkt->p.data[1] = 'K';
+            pkt->p.len = 2;
 
             // send quota info
             if (t->quota) {
-              pkt->len+=sprintf(&(pkt->data[pkt->len]),"%ld",t->permitted) + 1;
+              pkt->p.len+=sprintf(&(pkt->p.data[pkt->p.len]),"%ld",t->permitted) + 1;
             }
 
-            pkt->type = MLVPN_PKT_AUTH_OK;
+            pkt->p.type = MLVPN_PKT_AUTH_OK;
             if (t->status < MLVPN_AUTHOK)
                 t->status = MLVPN_AUTHSENT;
             log_debug("protocol", "%s sending 'OK'", t->name);
             log_info("protocol", "%s authenticated", t->name);
 //            mlvpn_rtun_tick(t);
 //            mlvpn_rtun_status_up(t);
-            if (!ev_is_active(&t->io_write)) {
-                ev_io_start(EV_A_ &t->io_write);
-            }
+//            if (!ev_is_active(&t->io_write)) {
+//                ev_io_start(EV_A_ &t->io_write);
+//            }
         }
     } else {
         /* client side */
@@ -1423,18 +1538,21 @@ mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn, int len)
       log_debug("resend", "No suitable tunnel to request resend");
       return;
     }
-    if (mlvpn_cb_is_full(t->hpsbuf))
+    if (mlvpn_pkt_list_is_full(&t->hpsbuf))
         log_warnx("net", "%s high priority buffer: overflow", t->name);
-    pkt = mlvpn_pktbuffer_write(t->hpsbuf);
-    struct resend_data *d=(struct resend_data *)(pkt->data);
+    pkt = mlvpn_pkt_get();
+    MLVPN_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
+    
+    struct resend_data *d=(struct resend_data *)(pkt->p.data);
     d->r='R';
     d->s='S';
+    // ENDIANNESS !!!!
     d->seqn=tun_seqn;
     d->tun_id=loss_tun->id;
     d->len=len;
-    pkt->len = sizeof(struct resend_data);
+    pkt->p.len = sizeof(struct resend_data);
 
-    pkt->type = MLVPN_PKT_RESEND;
+    pkt->p.type = MLVPN_PKT_RESEND;
     out_resends+=len;
     log_debug("resend", "On %s request resend %lu (lost from tunnel %s)", t->name, tun_seqn, loss_tun->name);
 }
@@ -1451,8 +1569,9 @@ static mlvpn_tunnel_t *mlvpn_find_tun(int id)
 static void
 mlvpn_rtun_resend(struct resend_data *d)
 {
-  mlvpn_pkt_t *pkt;
   mlvpn_tunnel_t *loss_tun=mlvpn_find_tun(d->tun_id);
+  if (!loss_tun) return;
+  
   if (loss_tun->sent_loss==0) {
     loss_tun->sent_loss++; // We KNOW they had a loss here !
     // Mark it as at least a '1', which will prevent some things from usng the tunnel
@@ -1462,26 +1581,31 @@ mlvpn_rtun_resend(struct resend_data *d)
   
   for (int i=0; i<d->len;i++) {
     uint64_t seqn=d->seqn+i;
-    if (loss_tun && loss_tun->old_pkts_n[seqn % PKTBUFSIZE] == seqn) {
-      mlvpn_pkt_t *old_pkt=loss_tun->old_pkts[seqn % PKTBUFSIZE];
-      set_reorder(old_pkt);
-      if (old_pkt->reorder) { // refuse to resend UDP packets!
+    mlvpn_pkt_t *old_pkt=loss_tun->old_pkts[seqn % PKTBUFSIZE];
+    if (old_pkt && old_pkt->p.tun_seq==seqn) {
+//      set_reorder(old_pkt);
+      if (old_pkt->p.reorder) { // refuse to resend UDP packets!
         mlvpn_tunnel_t *t=best_quick_tun(loss_tun);
         if (t) {
-          if (mlvpn_cb_is_full(t->hpsbuf))
+          if (mlvpn_pkt_list_is_full(&t->hpsbuf))
             log_warnx("net", "%s high priority buffer: overflow", t->name);
-          pkt = mlvpn_pktbuffer_write(t->hpsbuf);
-          memcpy(pkt, old_pkt, sizeof(mlvpn_pkt_t));
-          pkt->type=MLVPN_PKT_DATA_RESEND;
-          log_debug("resend", "resend on tunnel %s, packet (tun seq: %lu data seq %lu) previously sent on %s", t->name, seqn, old_pkt->seq, loss_tun->name);
+          loss_tun->old_pkts[seqn % PKTBUFSIZE]=NULL; // remove this from the old list
+          MLVPN_TAILQ_INSERT_HEAD(&t->hpsbuf, old_pkt); 
+          old_pkt->p.type=MLVPN_PKT_DATA_RESEND;
+          log_debug("resend", "resend on tunnel %s, packet (tun seq: %lu data seq %lu) previously sent on %s", t->name, seqn, old_pkt->p.data_seq, loss_tun->name);
         } else {
-          log_debug("resend", "No suitable tunnel, unable to resend (tun seq: %lu data seq %lu)",seqn, old_pkt->seq);
+          log_debug("resend", "No suitable tunnel, unable to resend (tun seq: %lu data seq %lu)",seqn, old_pkt->p.data_seq);
         }
       } else {
-        log_debug("resend", "Wont resent packet (tun seq: %lu data seq %lu) of type %d", seqn, old_pkt->seq, (unsigned char)old_pkt->data[6]);
+        log_debug("resend", "Wont resent packet (tun seq: %lu data seq %lu) of type %d", seqn, old_pkt->p.data_seq, (unsigned char)old_pkt->p.data[6]);
       }
     } else {
-      log_debug("resend", "unable to resend seq %lu (Not Found)",seqn);
+      if (old_pkt) {
+        log_debug("resend", "unable to resend seq %lu (Not Found - replaced by %lu)",seqn, old_pkt->p.tun_seq);
+      } else {
+        log_debug("resend", "unable to resend seq %lu (Not Found - empty slot)",seqn);
+      }
+      
     }
   }
 }
@@ -1523,9 +1647,8 @@ void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
   }
   last=now;
   
-  bandwidth=((((double)bandwidthdata*8) / diff))/1000; // kbits/sec
+  bandwidth=(bandwidth + ((((double)bandwidthdata/128.0) / diff)*9.0))/10.0;
   bandwidthdata=0;
-  num_packets = 0;
 
   // what we can do here is add any bandwidth allocation
   // The allocation should be per second.
@@ -1540,122 +1663,182 @@ void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
 //    send_timer.repeat = 0.01/((bandwidth/8.0)*1000.0/(float)DEFAULT_MTU);
     
 //  }
-//  printf("Repeat %f %f  %d\n",send_timer.repeat, 1.0/((bandwidth/8.0)*1000.0/(float)DEFAULT_MTU), mlvpn_cb_length(send_buffer));
+//  printf("Repeat %f %f  %d\n",send_timer.repeat, 1.0/((bandwidth/8.0)*1000.0/(float)DEFAULT_MTU), MLVPN_TAILQ_LENGTH(send_buffer));
 
+  srtt_av=0;
   mlvpn_tunnel_t *t;
+  int tuns=0;
   LIST_FOREACH(t, &rtuns, entries) {
-    // permitted is in BYTES per second.
-    if (t->quota) {
-      t->permitted+=(((double)t->quota * diff)*1024.0)/8.0; // listed in kbps
-    }
-
-    // calc the srtt average...
-    t->srtt_av = (t->srtt_av_d / t->srtt_av_c);
-    // reset so if we get no traffic, we still see a valid srtt
-    t->srtt_av_d=t->srtt_raw + (4*t->rttvar);;
-    t->srtt_av_c=1;
-
-    // calc measured bandwidth
-    t->bandwidth_measured=((((double)t->bm_data*8.0)/1024.0) / diff); // kbits/sec
-    t->bm_data=0;
+    if (t->status >= MLVPN_AUTHOK) {
+      tuns++;
+      // permitted is in BYTES per second.
+      if (t->quota) {
+        t->permitted+=(double)t->quota * diff*128.0; // listed in kbps (1024/8)
+      }
+      
+      // calc the srtt average...
+      t->srtt_av = (t->srtt_av_d / t->srtt_av_c);
+      // reset so if we get no traffic, we still see a valid srtt
+      t->srtt_av_d=t->srtt_raw + (4*t->rttvar);;
+      t->srtt_av_c=1;
+      srtt_av+=t->srtt_av;
+      
+      // calc measured bandwidth
+      t->bandwidth_measured=((double)t->bm_data/128.0) / diff; // kbits/sec
+      t->bm_data=0;
 //    printf("BW: %s %lu\n",t->name, t->bandwidth_measured);
-
-    if (t->loss_cnt) {
-      double current_loss=((double)t->loss_event * 100.0)/ (double)t->loss_cnt;
-      t->loss_av=current_loss;//((t->loss_av*3.0)+current_loss)/4.0;
-    } else {
-      if (t->loss_event || t->status!=MLVPN_AUTHOK) {
-        t->loss_av=100.0;
+      
+      if (t->loss_cnt) {
+        double current_loss=((double)t->loss_event * 100.0)/ (double)t->loss_cnt;
+        t->loss_av=current_loss;//((t->loss_av*3.0)+current_loss)/4.0;
       } else {
-        t->loss_av=0;
+        if (t->loss_event || t->status!=MLVPN_AUTHOK) {
+          t->loss_av=100.0;
+        } else {
+          t->loss_av=0;
+        }
       }
-    }
-    t->loss_event=0;
-    t->loss_cnt=0;
-
-    // hunt a high watermark with slow drift
+      t->loss_event=0;
+      t->loss_cnt=0;
+      
+      // hunt a high watermark with slow drift
 //      if (t->srtt_av < target) {
-    if (t->sent_loss == 0) {
-      if (t->bandwidth_out>t->bandwidth_max) {
-        t->bandwidth_max=t->bandwidth_out;
-        // we could 'drift' the target here...
+      if (t->bandwidth_out > t->bandwidth_max/2)
+      {
+        double new_bwm=t->bandwidth_max;
+//        double asked=t->bytes_per_sec/128.0;
+        
+        if (t->sent_loss < t->loss_tolerence/4) {
+          if (t->bandwidth_out>t->bandwidth_max) {
+            new_bwm=t->bandwidth_out;
+//            if (t->sent_loss==0) {
+//              new_bwm+=1000;
+//            }
+          } else if ((t->bandwidth_out>((float)t->bandwidth_max*0.8)) && t->sent_loss==0) {
+            new_bwm+=1000;
+          }
+        } else {
+          if (t->bandwidth_out<t->bandwidth_max) {
+            new_bwm=t->bandwidth_out;
+          } else {
+            new_bwm-=1000;
+          }
+          if (new_bwm<100) new_bwm=100;
+        }
+        t->bandwidth_max=(((float)t->bandwidth_max*3.0)+new_bwm)/4.0;  
       }
-//      } else {
-//        if (t->bandwidth*2 < t->bandwidth_max && t->bandwidth_max > 10) {
-//          t->bandwidth_max *= 0.95;
-//        }
-    }
-
+      
+      
+      
 //      if (t->srtt_av < target*0.9 && t->bandwidth < t->bandwidth_max) {
-    if (t->sent_loss==0) {
-      if (t->bandwidth < t->bandwidth_max*1.2) {
-        t->bandwidth*=1.05;
+      if (t->sent_loss==0) {
+        if (t->bandwidth < t->bandwidth_max*1.1) {
+          t->bandwidth=((t->bandwidth*3)+t->bandwidth_max*1.1)/4;
+        }
+      } else {
+//      if (t->sent_loss > t->loss_tolerence/4.0)
+        if (t->bandwidth_out > (t->bandwidth_max/2)) { // ignore noise
+          if (t->bandwidth_out < t->bandwidth_max) {
+            t->bandwidth=(t->bandwidth + t->bandwidth_out)/2;
+          } else {
+            t->bandwidth=t->bandwidth_max*0.8;
+          }
+          
+        }
       }
-    } else {
-      if (t->sent_loss > t->loss_tolerence/4.0)
-      if (t->bandwidth_out < t->bandwidth_max && /*t->srtt_av > target*1.1 &&*/ t->bandwidth_out > (t->bandwidth_max/4)) {
-        t->bandwidth=/*t->bandwidth_out * 0.8;//*/(t->bandwidth + t->bandwidth_out)/2;
-        if (t->bandwidth_max > 100 && t->bandwidth<t->bandwidth_max) {
-          t->bandwidth_max=(t->bandwidth_max + t->bandwidth)/2;
+      
+      
+      if (t->seq_vect==(uint64_t)-1  /* !t->loss*/) {
+        if (t->reorder_length > t->reorder_length_preset) {
+          t->reorder_length--;
         }
       }
     }
-
-    if (t->seq_vect==(uint64_t)-1  /* !t->loss*/) {
-      if (t->reorder_length > t->reorder_length_preset) {
-        t->reorder_length--;
-      }
-    }
   }
-  mlvpn_rtun_recalc_weight();
-//  printf("%d\n",mlvpn_cb_length(send_buffer));
   
-//  LIST_FOREACH(t, &rtuns, entries) {
+  srtt_av/=tuns; // tuns is the OK tunnels
+
+  mlvpn_rtun_recalc_weight();
+//  printf("%d\n",MLVPN_TAILQ_LENGTH(send_buffer));
+  
+  LIST_FOREACH(t, &rtuns, entries) {
+    
+//  TRY the other sort ot timer???? to better handle 'err' ?
+//    printf("%s asked %f got %f %lu\n",t->name, t->bytes_per_sec, t->bytes_since_adjust / (now-t->last_adjust), MLVPN_TAILQ_LENGTH(&send_buffer));
+    t->bytes_since_adjust=0;
+    t->last_adjust=now;
+
+  if (t->weight>0) {
+    double b = t->weight*128.0;
+    b *= 1.01 - (1.0/(6+(MLVPN_TAILQ_LENGTH(&send_buffer)/(send_buffer.max_size/20))));
+//    b *= 1.2;// overhead etc
+    t->bytes_per_sec = ((t->bytes_per_sec *9.0)+b)/10.0;
+//    t->bytes_per_sec = b;
+
+    ev_tstamp repeat = DEFAULT_MTU / t->bytes_per_sec;
+//    if (repeat < 0.001) repeat=0.001; // max out the timer accuracy
+    if (repeat > MLVPN_IO_TIMEOUT_DEFAULT) repeat=MLVPN_IO_TIMEOUT_DEFAULT;
+    t->send_timer.repeat = repeat;//*/((t->send_timer.repeat * 19) + repeat )/20;
+  } else {
+    t->bytes_per_sec = DEFAULT_MTU*2;
+    t->send_timer.repeat = MLVPN_IO_TIMEOUT_DEFAULT;
+  }
+//    t->send_timer.repeat = MLVPN_IO_TIMEOUT_DEFAULT;
+//  t->send_timer.repeat = 0.001;
+  
 //    t->send_timer.repeat = 1.0 / (((t->weight/8.0) * 1000.0)/mtu_av);
-//  }
+  }
 }
 
 static void
-mlvpn_rtun_choose(EV_P_ ev_timer *w, int revents)
+mlvpn_rtun_choose(mlvpn_tunnel_t *rtun)//EV_P_ ev_timer *w, int revents)
 {
-  mlvpn_tunnel_t *rtun=NULL;
-  rtun = w->data;
-  if (!rtun) return;
-  if (mlvpn_cb_is_empty(send_buffer)) return;
+//  mlvpn_tunnel_t *rtun=NULL;
+//  rtun = w->data;
+
+//  ev_tstamp now = ev_now(EV_DEFAULT_UC);
+//  ev_tstamp err=(now-rtun->last_choose);
+//  rtun->last_choose=now;
+//  do {
+    
+//  if (!rtun) return;
+
+  if (MLVPN_TAILQ_EMPTY(&send_buffer)) return;
   if (rtun->status!=MLVPN_AUTHOK) return;
   if (rtun->quota && rtun->permitted < DEFAULT_MTU*2) return;
-  
-  circular_buffer_t *sbuf;
-  sbuf = rtun->sbuf;
 
-  mlvpn_pkt_t *pkt;
-//  printf("%d\n",mlvpn_cb_length(send_buffer));
-  mlvpn_pkt_t *spkt = mlvpn_pktbuffer_read(send_buffer);
-  u_char *data=(u_char *)(spkt->data);
-  uint32_t len=spkt->len;
+//  printf("error %f %f %f\n",((err) - rtun->send_timer.repeat), rtun->send_timer.repeat, (err) );
+  
+
+  mlvpn_pkt_list_t *sbuf = &rtun->sbuf;
+
+//  printf("%d\n",MLVPN_TAILQ_LENGTH(send_buffer));
+  mlvpn_pkt_t *spkt = MLVPN_TAILQ_POP_LAST(&send_buffer);
+  if (!ev_is_active(&tuntap.io_read)) {
+    ev_io_start(EV_A_ &tuntap.io_read);
+  }
 
 #ifdef HAVE_FILTERS
-  // SWAP tunnels for a filter. - I think FILTERS should be removed !
+  u_char *data=(u_char *)(spkt->p.data);
+  uint32_t len=spkt->p.len;
+
   mlvpn_tunnel_t *frtun = mlvpn_filters_choose((uint32_t)len,data);
   if (frtun) {
     /* High priority buffer, not reorderd when a filter applies */
     rtun=frtun;
-    sbuf = rtun->hpsbuf;
+    sbuf = &rtun->hpsbuf;
   }
 #endif
-    
   
-  if (mlvpn_cb_is_full(sbuf))
+  if (mlvpn_pkt_list_is_full(sbuf))
     log_warnx("tuntap", "%s buffer: overflow", rtun->name);
   
   /* Ask for a free buffer */
-  pkt = mlvpn_pktbuffer_write(sbuf);
-  pkt->len = len;
-  /* TODO: REALLY INEFFICIENT COPY */
-  memcpy(pkt->data, data, pkt->len);
-  if (!ev_is_active(&rtun->io_write) && !mlvpn_cb_is_empty(sbuf)) {
-    ev_io_start(EV_DEFAULT_UC, &rtun->io_write);
-  }
+  MLVPN_TAILQ_INSERT_HEAD(sbuf, spkt);
+
+//  if (!ev_is_active(&rtun->io_write)) {// && !MLVPN_TAILQ_EMPTY(sbuf)) {
+//    ev_io_start(EV_DEFAULT_UC, &rtun->io_write);
+//  }
   
 /*  mlvpn_tunnel_t *t;
   int i;
@@ -1669,16 +1852,27 @@ mlvpn_rtun_choose(EV_P_ ev_timer *w, int revents)
     rtun->send_timer.repeat *= (((rtun->srtt_raw / av_srtt)-1.0)/100000.0)+1.0;
   }
 */
-//  double speedup=(((float)mlvpn_cb_length(send_buffer)+1.0)/(float)PKTBUFSIZE) + 0.75;
-  rtun->send_timer.repeat = ((float)len + OVERHEAD) / (((rtun->weight*1024.0)/8.0)/**(speedup)*/);
-  if (mlvpn_cb_length(send_buffer) > PKTBUFSIZE/2) 
-    rtun->send_timer.repeat*=0.99;
-  if (mlvpn_cb_length(send_buffer) < PKTBUFSIZE/4) 
-    rtun->send_timer.repeat*=1.01;
-  
-  if (mlvpn_cb_length(send_buffer)==0) {
-    // stop it here, startit again if you need it
+#if 0
+//  double speedup=(((float)MLVPN_TAILQ_LENGTH(send_buffer)+1.0)/(float)PKTBUFSIZE)
+//  + 0.75;
+  ev_tstamp repeat = ((float)len + OVERHEAD) / (((rtun->weight*1024.0)/8.0)/**(speedup)*/);
+  if (MLVPN_TAILQ_LENGTH(send_buffer) > PKTBUFSIZE/2) 
+    repeat*=0.90;
+  if (MLVPN_TAILQ_LENGTH(send_buffer) < PKTBUFSIZE/4) 
+    repeat*=3.0;
+  rtun->send_timer.repeat = ((rtun->send_timer.repeat * 19) + repeat )/20;
+
+  if (err < rtun->send_timer.repeat) {
+    rtun->send_timer.repeat -= err;
+    break;
+  } else {
+    err-=rtun->send_timer.repeat;
   }
+#endif  
+//  }
+//  while (err > rtun->send_timer.repeat);
+  
+  
   
   return;
 }
@@ -1688,13 +1882,14 @@ static void
 mlvpn_rtun_send_keepalive(ev_tstamp now, mlvpn_tunnel_t *t)
 {
     mlvpn_pkt_t *pkt;
-    if (mlvpn_cb_is_full(t->hpsbuf))
+    if (mlvpn_pkt_list_is_full(&t->hpsbuf))
         log_warnx("net", "%s high priority buffer: overflow", t->name);
     else {
         log_debug("protocol", "%s sending keepalive", t->name);
-        pkt = mlvpn_pktbuffer_write(t->hpsbuf);
-        pkt->type = MLVPN_PKT_KEEPALIVE;
-        pkt->len=sprintf(pkt->data,"%lu",t->bandwidth_measured) + 1;
+        pkt = mlvpn_pkt_get();
+        MLVPN_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
+        pkt->p.type = MLVPN_PKT_KEEPALIVE;
+        pkt->p.len = sprintf(pkt->p.data,"%lu",t->bandwidth_measured) + 1;
     }
     t->next_keepalive = NEXT_KEEPALIVE(now, t);
 }
@@ -1703,14 +1898,16 @@ static void
 mlvpn_rtun_send_disconnect(mlvpn_tunnel_t *t)
 {
     mlvpn_pkt_t *pkt;
-    if (mlvpn_cb_is_full(t->hpsbuf))
+    if (mlvpn_pkt_list_is_full(&t->hpsbuf))
         log_warnx("net", "%s high priority buffer: overflow", t->name);
     else {
         log_debug("protocol", "%s sending disconnect", t->name);
-        pkt = mlvpn_pktbuffer_write(t->hpsbuf);
-        pkt->type = MLVPN_PKT_DISCONNECT;
+        pkt = mlvpn_pkt_get();
+        MLVPN_TAILQ_INSERT_HEAD(&t->hpsbuf, pkt);
+        pkt->p.type = MLVPN_PKT_DISCONNECT;
+        pkt->p.len = 1;
     }
-    mlvpn_rtun_send(t, t->hpsbuf);
+    mlvpn_rtun_send(t, MLVPN_TAILQ_POP_LAST(&t->hpsbuf));
 }
 
 static void
@@ -1781,9 +1978,9 @@ mlvpn_rtun_check_timeout(EV_P_ ev_timer *w, int revents)
     if (t->status < MLVPN_AUTHOK) {
         mlvpn_rtun_tick_connect(t);
     }
-    if (!ev_is_active(&t->io_write) && ! mlvpn_cb_is_empty(t->hpsbuf)) {
-        ev_io_start(EV_A_ &t->io_write);
-    }
+//    if (!ev_is_active(&t->io_write) && ! MLVPN_TAILQ_EMPTY(t->hpsbuf)) {
+//        ev_io_start(EV_A_ &t->io_write);
+//    }
 }
 
 
@@ -1791,15 +1988,23 @@ static void
 tuntap_io_event(EV_P_ ev_io *w, int revents)
 {
     if (revents & EV_READ) {
-      if (!mlvpn_cb_is_full(send_buffer)) {
-        mlvpn_tuntap_read(&tuntap);
-      }
-    } else if (revents & EV_WRITE) {
-        mlvpn_tuntap_write(&tuntap);
-        /* Nothing else to read */
-        if (mlvpn_cb_is_empty(tuntap.sbuf)) {
-            ev_io_stop(EV_A_ &tuntap.io_write);
+      if (!mlvpn_pkt_list_is_full(&send_buffer)) {
+        mlvpn_send_buffer_write(mlvpn_tuntap_read(&tuntap));
+      } else {
+        if (ev_is_active(&tuntap.io_read)) {
+          ev_io_stop(EV_A_ &tuntap.io_read);
         }
+      }
+    }
+    else if (revents & EV_WRITE) {
+      if (!MLVPN_TAILQ_EMPTY(&tuntap.sbuf)) {
+        mlvpn_pkt_t *pkt=MLVPN_TAILQ_POP_LAST(&tuntap.sbuf);
+        mlvpn_tuntap_write(&tuntap, pkt);
+        /* Nothing else to read */
+        if (MLVPN_TAILQ_EMPTY(&tuntap.sbuf)) {
+          ev_io_stop(EV_A_ &tuntap.io_write);
+        }
+      }
     }
 }
 
@@ -1812,7 +2017,7 @@ mlvpn_tuntap_init()
     tuntap.maxmtu = 1500 - PKTHDRSIZ(proto) - IP4_UDP_OVERHEAD;
     log_debug(NULL, "absolute maximum mtu: %d", tuntap.maxmtu);
     tuntap.type = MLVPN_TUNTAPMODE_TUN;
-    tuntap.sbuf = mlvpn_pktbuffer_init(PKTBUFSIZE);
+    mlvpn_pkt_list_init(&tuntap.sbuf, PKTBUFSIZE);
     ev_init(&tuntap.io_read, tuntap_io_event);
     ev_init(&tuntap.io_write, tuntap_io_event);
 }
@@ -2025,6 +2230,8 @@ main(int argc, char **argv)
 
     log_init(mlvpn_options.debug, mlvpn_options.verbose, __progname);
 
+    MLVPN_TAILQ_INIT(&pool);
+
 #ifdef HAVE_LINUX
     mlvpn_systemd_notify();
 #endif
@@ -2064,7 +2271,7 @@ main(int argc, char **argv)
       mlvpn_tunnel_t *t;
       int i=0,p=0;
       LIST_FOREACH(t, &rtuns, entries) {i++;if (1<<p < i) p++;}
-      send_buffer = mlvpn_pktbuffer_init(PKTBUFSIZE/*<<p*/);
+      mlvpn_pkt_list_init(&send_buffer, PKTBUFSIZE);
     }
 //    ev_timer_init(&send_timer, &mlvpn_rtun_choose, 0., 0.01);
 //    ev_timer_start(EV_A_ &send_timer);

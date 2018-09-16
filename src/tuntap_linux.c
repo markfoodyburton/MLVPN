@@ -10,53 +10,60 @@
 #include "buffer.h"
 #include "tuntap_generic.h"
 #include "tool.h"
+#include "pkt.h"
 
-int
-mlvpn_tuntap_read(struct tuntap_s *tuntap)
+mlvpn_pkt_t *spair=NULL;
+mlvpn_pkt_t *mlvpn_tuntap_read(struct tuntap_s *tuntap)
 {
-    ssize_t ret;
-    u_char data[DEFAULT_MTU];
-// Trying a loop here wouldseem reasonable, to "read as much as possible", and
-// then we'de have better bandwidth measure. However, it seems to make things
-// worse. Presumably the extra 'buffering' does not play well....
-    ret = read(tuntap->fd, &data, DEFAULT_MTU);
-      
-    if (ret<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) {
-      return -1;
-    }
-    
-    if (ret < 0) {
-        /* read error on tuntap is not recoverable. We must die. */
-        fatal("tuntap", "unrecoverable read error");
-    } else if (ret == 0) { /* End of file */
-        fatalx("tuntap device closed");
-    } else if (ret > tuntap->maxmtu)  {
-        log_warnx("tuntap",
-            "cannot send packet: too big %d/%d. truncating",
-            (uint32_t)ret, tuntap->maxmtu);
-        ret = tuntap->maxmtu;
-    }
-    return mlvpn_tuntap_generic_read(data, ret);
+  if (!spair) spair=mlvpn_pkt_get();
+  mlvpn_pkt_t *p=spair;
+  ssize_t ret;
+  ret = read(tuntap->fd, &(p->p.data), DEFAULT_MTU);
+  
+  if (ret<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) {
+    return NULL;
+  }
+  
+  if (ret < 0) {
+    /* read error on tuntap is not recoverable. We must die. */
+    fatal("tuntap", "unrecoverable read error");
+  } else if (ret == 0) { /* End of file */
+    fatalx("tuntap device closed");
+  } else if (ret > tuntap->maxmtu)  {
+    log_warnx("tuntap",
+              "cannot send packet: too big %d/%d. truncating",
+              (uint32_t)ret, tuntap->maxmtu);
+    ret = tuntap->maxmtu;
+  }
+  log_debug("tuntap", "%s < recv %zd bytes",
+            tuntap->devname, ret);
+  spair=NULL; // we've used this one now.
+  p->p.len=ret; // data length
+  p->p.type=MLVPN_PKT_DATA;
+
+  return p;
 }
 
 int
-mlvpn_tuntap_write(struct tuntap_s *tuntap)
+mlvpn_tuntap_write(struct tuntap_s *tuntap, mlvpn_pkt_t *pkt)
 {
     ssize_t ret;
-    mlvpn_pkt_t *pkt;
-    circular_buffer_t *buf = tuntap->sbuf;
+//    mlvpn_pkt_t *pkt;
 
-    /* Safety checks */
-    if (mlvpn_cb_is_empty(buf))
-        fatalx("tuntap_write called with empty buffer");
-
-    pkt = mlvpn_pktbuffer_read(buf);
-    ret = write(tuntap->fd, pkt->data, pkt->len);
+//    /* Safety checks */
+//    if (MLVPN_TAILQ_EMPTY(&tuntap->sbuf)) {
+//      log_warnx("tuntap","tuntap_write called with empty buffer");
+//      return -1;
+//    }
+    
+//    pkt = MLVPN_TAILQ_POP_LAST(&tuntap->sbuf);
+    ret = write(tuntap->fd, pkt->p.data, pkt->p.len);
+    mlvpn_pkt_release(pkt);
     if (ret < 0)
     {
         log_warn("tuntap", "%s write error", tuntap->devname);
     } else {
-        if (ret != pkt->len)
+        if (ret != pkt->p.len)
         {
             log_warnx("tuntap", "%s write error: %zd/%d bytes sent",
                tuntap->devname, ret, pkt->len);
