@@ -982,6 +982,7 @@ mlvpn_rtun_new(const char *name,
     new->bytes_since_adjust=0;
     new->bytes_per_sec=0;
     new->busy_writing=0;
+    new->lossless=0;
 
     memset(&new->old_pkts, 0, sizeof(new->old_pkts));
     update_process_title();
@@ -1533,7 +1534,7 @@ static void
 mlvpn_rtun_request_resend(mlvpn_tunnel_t *loss_tun, uint64_t tun_seqn, int len)
 {
     mlvpn_pkt_t *pkt;
-    mlvpn_tunnel_t *t=best_quick_tun(loss_tun);
+    mlvpn_tunnel_t *t=best_quick_tun(NULL/*loss_tun*/);
     if (!t) {
       log_debug("resend", "No suitable tunnel to request resend");
       return;
@@ -1576,16 +1577,14 @@ mlvpn_rtun_resend(struct resend_data *d)
     loss_tun->sent_loss++; // We KNOW they had a loss here !
     // Mark it as at least a '1', which will prevent some things from usng the tunnel
   }
-//  loss_tun->send_timer.repeat *= 0.9999;
-//  loss_tun->weight*=0.99;
   
   for (int i=0; i<d->len;i++) {
     uint64_t seqn=d->seqn+i;
     mlvpn_pkt_t *old_pkt=loss_tun->old_pkts[seqn % PKTBUFSIZE];
     if (old_pkt && old_pkt->p.tun_seq==seqn) {
 //      set_reorder(old_pkt);
-      if (old_pkt->p.reorder) { // refuse to resend UDP packets!
-        mlvpn_tunnel_t *t=best_quick_tun(loss_tun);
+      if (old_pkt->p.reorder && old_pkt->p.type==MLVPN_PKT_DATA) { // only send tcp, e.g. refuse UDP packets!
+        mlvpn_tunnel_t *t=best_quick_tun(NULL/*loss_tun*/);
         if (t) {
           if (mlvpn_pkt_list_is_full(&t->hpsbuf))
             log_warnx("net", "%s high priority buffer: overflow", t->name);
@@ -1646,9 +1645,13 @@ void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
     diff=now-last;
   }
   last=now;
-  
-  bandwidth=(bandwidth + ((((double)bandwidthdata/128.0) / diff)*9.0))/10.0;
+  double new_bw=((double)bandwidthdata/128.0) / diff;
   bandwidthdata=0;
+  if (new_bw> bandwidth) {
+    bandwidth=new_bw;
+  } else {
+    bandwidth=((bandwidth*99.0) + new_bw)/100.0;
+  }
 
   // what we can do here is add any bandwidth allocation
   // The allocation should be per second.
@@ -1709,12 +1712,30 @@ void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
 //        double asked=t->bytes_per_sec/128.0;
         
         if (t->sent_loss < t->loss_tolerence/4) {
+          // FASTGROWTH
+          if (t->sent_loss==0 && t->lossless>10 && (t->bandwidth_out>((float)t->bandwidth_max*0.80))) {
+            // FASTGROTH MODE
+            new_bwm*=2;
+          } else {
+            if (t->lossless>10) {
+              // We just fell off the fast growth
+              t->lossless=0;
+              if (t->sent_loss!=0) {
+                new_bwm=0;
+              }
+            } else if (t->sent_loss==0 && (t->bandwidth_out>((float)t->bandwidth_max*0.90))) {
+              t->lossless++;
+            } else {
+              t->lossless=0;
+            }
+          }
+
           if (t->bandwidth_out>t->bandwidth_max) {
             new_bwm=t->bandwidth_out;
-//            if (t->sent_loss==0) {
-//              new_bwm+=1000;
-//            }
-          } else if ((t->bandwidth_out>((float)t->bandwidth_max*0.8)) && t->sent_loss==0) {
+            if (t->sent_loss==0) {
+              new_bwm+=1000;
+            }
+          } else if ((t->bandwidth_out>((float)t->bandwidth_max*0.95)) && t->sent_loss==0) {
             new_bwm+=1000;
           }
         } else {
@@ -1770,7 +1791,8 @@ void mlvpn_calc_bandwidth(EV_P_ ev_timer *w, int revents)
 
   if (t->weight>0) {
     double b = t->weight*128.0;
-    b *= 1.01 - (1.0/(6+(MLVPN_TAILQ_LENGTH(&send_buffer)/(send_buffer.max_size/20))));
+//    b *= 1.01 - (1.0/(6+(MLVPN_TAILQ_LENGTH(&send_buffer)/(send_buffer.max_size/100))));
+    b *= 1.01 - (1.0/(3+MLVPN_TAILQ_LENGTH(&send_buffer)));
 //    b *= 1.2;// overhead etc
     t->bytes_per_sec = ((t->bytes_per_sec *9.0)+b)/10.0;
 //    t->bytes_per_sec = b;

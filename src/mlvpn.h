@@ -205,6 +205,7 @@ typedef struct mlvpn_tunnel_s
     ev_tstamp last_adjust;
     uint64_t bytes_since_adjust;
     double bytes_per_sec;
+    int lossless;
     int busy_writing;  
 
     mlvpn_pkt_t *old_pkts[PKTBUFSIZE];

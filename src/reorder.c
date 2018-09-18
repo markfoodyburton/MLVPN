@@ -53,7 +53,7 @@ struct mlvpn_reorder_buffer {
   uint64_t delivered;
 
   ev_tstamp last;
-  int arrived;
+  uint64_t pkts_arrived;
   double pkts_per_sec;
   uint64_t pkts_sent;
 
@@ -128,18 +128,24 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
   ev_tstamp now=ev_now(EV_DEFAULT_UC);
   ev_tstamp diff=now - b->last;
   b->last = now;
-  b->pkts_sent=0;
 
   int up=0;
   LIST_FOREACH(t, &rtuns, entries)
   {
+
+//    worst 'reorder time' for any tunnel  /  fastest tunnel
+//                                   +
+//                                   process/wait time
+//                                   + srtt
+
+                                   
     if (t->status >= MLVPN_AUTHOK) up++;
     if (t->status == MLVPN_AUTHOK && !t->fallback_only) {
       /* We don't want to monitor fallback only links inside the
        * reorder timeout algorithm
        */
       if (t->srtt_av > max_srtt) {
-        max_srtt += t->srtt_av;
+        max_srtt = t->srtt_av;
         ts++;
       }
         
@@ -158,10 +164,13 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
     max_srtt=800;
   }
 
-  b->max_srtt=max_srtt;
-
+  b->max_srtt=  (b->max_srtt*9 + max_srtt)/10;
+  
+//  printf("%lu pkts arrived, %lu sent, %f pkts expected\n",b->pkts_arrived, b->pkts_sent, b->pkts_per_sec * diff);
+  
   if (diff) {
-    b->pkts_per_sec=((float)b->arrived/diff);
+    b->pkts_per_sec=((b->pkts_per_sec *9.0)+((float)b->pkts_arrived/diff))/10.0;
+//    b->pkts_per_sec=((float)b->pkts_arrived/diff);
 /*      
     ev_tstamp av=((b->diff / (float)b->arrived)/2.0);
     b->arrived=0;
@@ -171,10 +180,11 @@ void mlvpn_reorder_tick(EV_P_ ev_timer *w, int revents)
       reorder_drain_timeout.repeat=0.01;
       }*/
   } else {
-    b->pkts_per_sec=(float)b->arrived;
+    b->pkts_per_sec=(float)b->pkts_arrived;
 //    reorder_drain_timeout.repeat=0.01;
   }
-
+  b->pkts_sent=0;
+  b->pkts_arrived=0;
 //  log_debug("reorder", "adjusting reordering drain timeout to %.0fms", reorder_drain_timeout.repeat*1000 );
 }
 
@@ -211,7 +221,7 @@ mlvpn_reorder_reset()
   b->list_size_max=0;
   b->is_initialized=0;
   b->last=0;
-  b->arrived=0;
+  b->pkts_arrived=0;
   b->pkts_per_sec=1;
   b->pkts_sent=0;
   b->max_srtt=0.1;
@@ -225,7 +235,7 @@ void mlvpn_reorder_enable()
 void mlvpn_reorder_insert(mlvpn_tunnel_t *tun, mlvpn_pkt_t *pkt)
 {
   struct mlvpn_reorder_buffer *b=reorder_buffer;
-  b->arrived++;
+  b->pkts_arrived++;
 
 //  printf("received data seq %lu tun seq %lu from tun %s\n", pkt->p.data_seq, pkt->p.tun_seq, tun->name);
 
@@ -310,8 +320,13 @@ void mlvpn_reorder_drain()
   unsigned int drain_cnt = 0;
   // 2.2 is a good window size
   // 3 * more when we have resends (there and back + processing time etc)
-//  ev_tstamp cut=ev_now(EV_DEFAULT_UC) -  ((double)b->max_srtt/1000.0*(out_resends?6.6:2.2));
-  ev_tstamp cut=ev_now(EV_DEFAULT_UC) -  (MLVPN_IO_TIMEOUT_DEFAULT*(out_resends?2:1));
+//  ev_tstamp t=(((double)b->max_srtt/1000.0)*(out_resends?6.6:2.2));
+  ev_tstamp t=(((double)b->max_srtt/1000.0)*2.2)+0.3; // +300ms processing time
+  ev_tstamp cut=ev_now(EV_DEFAULT_UC) -  t;
+  int target_len=(b->pkts_per_sec * t);
+  if (target_len > PKTBUFSIZE*5) target_len=PKTBUFSIZE*5;
+  
+//  ev_tstamp cut=ev_now(EV_DEFAULT_UC) -  (MLVPN_IO_TIMEOUT_DEFAULT*(out_resends?4:2));
 
 /* We should
   deliver all packets in order
@@ -329,9 +344,6 @@ void mlvpn_reorder_drain()
 */
 
   int clearall=0;
-//  int target_len=(int)(b->max_srtt*2.2/(reorder_drain_timeout.repeat * 1000));
-  int target_len=(b->pkts_per_sec*1000.0) / (b->max_srtt*2.2);
-  if (target_len > PKTBUFSIZE*5) target_len=PKTBUFSIZE*5;
   while (!MLVPN_TAILQ_EMPTY(&b->list) &&
          ( aoldereqb(MLVPN_TAILQ_LAST(&b->list)->p.data_seq, b->min_seqn)
            || (MLVPN_TAILQ_LAST(&b->list)->timestamp < cut)
@@ -341,12 +353,7 @@ void mlvpn_reorder_drain()
   {
 
     if (!aoldereqb(MLVPN_TAILQ_LAST(&b->list)->p.data_seq, b->min_seqn) ) {
-      log_debug("loss","Clearing size %d last %f  outstanding resends %lu", b->list_size,  MLVPN_TAILQ_LAST(&b->list)->timestamp,  out_resends);
-      mlvpn_tunnel_t *t;
-      LIST_FOREACH(t, &rtuns, entries)
-      {
-        printf("%s last tun seq %lu seq vec %lx\n",t->name,t->seq_last, t->seq_vect);
-      }
+      log_debug("loss","Clearing: list size %d target %d last %f cut %f (%fs ago now: %fs)  outstanding resends %lu", b->list_size, target_len, MLVPN_TAILQ_LAST(&b->list)->timestamp, cut, t, ev_now(EV_DEFAULT_UC),  out_resends);
 //      clearall=1;
     }
     mlvpn_pkt_t *l = MLVPN_TAILQ_LAST(&b->list);
