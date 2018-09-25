@@ -408,8 +408,8 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl)
         0,
         tuntap.type == MLVPN_TUNTAPMODE_TUN ? "tun" : "tap",
         tuntap.devname,
-//        bandwidth,
-                   (double) MLVPN_TAILQ_LENGTH(&send_buffer),
+        bandwidth,
+//                   (double) MLVPN_TAILQ_LENGTH(&send_buffer),
         mlvpn_reorder_length(),
         mlvpn_total_loss(),
         pool_out
@@ -452,7 +452,7 @@ void mlvpn_control_write_status(struct mlvpn_control *ctrl)
                        t->disconnects,
                        (uint32_t)t->last_activity,
                        (uint32_t)t->timeout,
-                       t->bytes_per_sec/128,//git it in kbps
+                       t->bytes_per_sec/128.0,//git it in kbps
                        //t->weight,
                        (LIST_NEXT(t, entries) ? "," : "")
                       );

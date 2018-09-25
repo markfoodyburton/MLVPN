@@ -66,18 +66,19 @@ void mlvpn_rtun_set_weight(mlvpn_tunnel_t *t, double weight)
 //    if (weight<1)
 //      t->weight=1;
 //    else
-//      t->weight=weight;
-
-    if (weight>t->weight) {
       t->weight=weight;
+
+/*    if (weight>t->weight) {
+//      t->weight=weight;
+      t->weight=((t->weight * 3.0) + weight)/4.0;
     } else {
-      t->weight=(t->weight * 9.0 + weight)/10.0;
+      t->weight=((t->weight * 19.0) + weight)/20.0;
     }
 //    printf("weight %f %f\n",weight, t->weight);
     
     for (int i = 0; i< wrr.len; i++) {
       wrr.tunval[i] = 0.0;
-      }
+      }*/
   }
 }
 

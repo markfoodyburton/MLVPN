@@ -50,7 +50,8 @@
 
 /* Number of packets in the queue. Each pkt is ~ 1520 */
 /* 1520 * 128 ~= 24 KBytes of data maximum per channel VMSize */
-#define PKTBUFSIZE 1024*4
+#define PKTBUFSIZE 1024
+#define RESENDBUFSIZE 10240
 
 /* tuntap interface name size */
 #ifndef IFNAMSIZ
@@ -153,6 +154,7 @@ typedef struct mlvpn_tunnel_s
     double sent_loss;   /* loss as reported by far end */
     uint64_t loss_cnt;
     uint64_t loss_event;
+    uint64_t pkts_cnt;
     double loss_av;    /* our average loss */
     uint64_t seq;
 //    uint64_t expected_receiver_seq;
@@ -167,6 +169,7 @@ typedef struct mlvpn_tunnel_s
     double srtt_av_d;
     double srtt_av_c;
     double srtt_raw;
+    double srtt_min;
     double rttvar;
     double weight;        /* For weight round robin */
     uint32_t flow_id;
@@ -208,7 +211,7 @@ typedef struct mlvpn_tunnel_s
     int lossless;
     int busy_writing;  
 
-    mlvpn_pkt_t *old_pkts[PKTBUFSIZE];
+    mlvpn_pkt_t *old_pkts[RESENDBUFSIZE];
 } mlvpn_tunnel_t;
 
 #ifdef HAVE_FILTERS
